@@ -442,6 +442,7 @@
       state = await api("/api/new", settings);
       score = state.score;
       animate = true;
+      resetTree();
       logEl.innerHTML = "";
       log(`New game: ${describe(state)}.`);
       render();
@@ -511,6 +512,7 @@
   /** Run a search step by step, redrawing the insight panel as it grows.
    *  Returns the final snapshot. Takes ~1.4 s whatever the budget. */
   async function liveSearch(ai, game, kind) {
+    resetTree();
     const search = ai.startSearch(game);
     const frames = 36;
     const batch = Math.max(1, Math.ceil(search.total / frames));
@@ -688,35 +690,46 @@
     return line.some((c) => c[0] === 0 && c[1] === 0) ? "Diagonal" : "Anti-diagonal";
   }
 
-  // ---------------------------------------------------------------- AI insight
+  // ---------------------------------------------------------------- AI insight (flowing tree)
   const insightEl = $("#insight");
+  const arenaEl = document.querySelector(".arena");
   const SVG_NS = "http://www.w3.org/2000/svg";
+  const TREE_W = 760, TREE_H = 470;
+  const tree = { svg: $("#insightTree"), items: new Map(), order: 0 };
 
-  function svgEl(name, attrs, text) {
+  function svgEl(name, attrs) {
     const el = document.createElementNS(SVG_NS, name);
     for (const k in attrs) el.setAttribute(k, attrs[k]);
-    if (text !== undefined) el.textContent = text;
     return el;
+  }
+
+  function mixColor(t) {           // 0 -> orange, 0.5 -> slate, 1 -> blue
+    const a = [242, 153, 74], b = [26, 95, 208], m = [150, 160, 185];
+    const lerp = (p, q, u) => Math.round(p + (q - p) * u);
+    const [p, q, u] = t < 0.5 ? [a, m, t / 0.5] : [m, b, (t - 0.5) / 0.5];
+    return `rgb(${lerp(p[0], q[0], u)},${lerp(p[1], q[1], u)},${lerp(p[2], q[2], u)})`;
   }
 
   function renderInsight(liveSnap) {
     const ins = liveSnap || (state && state.ai_insight);
-    if (!ins || !state || state.mode !== "pvc") { insightEl.hidden = true; return; }
-    insightEl.hidden = false;
+    const show = !!(ins && state && state.mode === "pvc");
+    insightEl.hidden = !show;
+    arenaEl.classList.toggle("with-insight", show);
+    if (!show) return;
     const isMcts = ins.type === "mcts";
     insightEl.classList.toggle("live", !!ins.live);
-    if (ins.live) {
-      $("#insightMeta").textContent = isMcts
-        ? `simulation ${ins.done} / ${ins.total}`
-        : `move ${ins.done} / ${ins.total} · ${ins.nodes} nodes`;
-    } else {
-      $("#insightMeta").textContent = `${ins.nodes} nodes · ${ins.time_ms} ms`;
-    }
-    const replicaNote = ins.replica || ins.replica_shown ? " Shown live from a browser replica of the search; the server made the actual decision." : "";
+    $("#insightMeta").textContent = ins.live
+      ? (isMcts ? `simulation ${ins.done} / ${ins.total}` : `move ${ins.done} / ${ins.total} · ${ins.nodes} nodes`)
+      : `${ins.nodes} nodes · ${ins.time_ms} ms`;
+    const replica = ins.replica || ins.replica_shown ? " Drawn live from a browser replica of the search; the server made the actual decision." : "";
     $("#insightSub").textContent = (isMcts
-      ? `MCTS, ${ins.simulations} simulations. Bars: share of simulations spent on each move; the CPU plays the most-visited one.`
-      : `Minimax, depth ${ins.depth}, alpha-beta. Bars: root score of each move; the CPU plays the highest.`) + replicaNote;
+      ? `MCTS, ${ins.simulations} simulations. Node size = visits, colour = win rate for the CPU (orange low, blue high). The pulsing path is the simulation that just ran.`
+      : `Minimax, depth ${ins.depth}, alpha-beta. Each root move opens the opponent replies it examined; node size = positions searched, colour = score.`) + replica;
+    renderBars(ins, isMcts);
+    renderTree(ins, isMcts);
+  }
 
+  function renderBars(ins, isMcts) {
     const bars = $("#insightBars");
     bars.innerHTML = "";
     const root = ins.root || [];
@@ -738,65 +751,124 @@
       const fill = document.createElement("div"); fill.className = "fill"; fill.style.width = `${Math.max(2, widths[i] * 100)}%`;
       track.appendChild(fill);
       const val = document.createElement("span"); val.className = "val";
-      val.textContent = isMcts ? `${Math.round(n.win_rate * 100)}% · ${n.visits} sims` : pending ? "…" : (n.score > 0 ? `+${n.score}` : `${n.score}`);
+      val.textContent = isMcts ? `${Math.round(n.win_rate * 100)}% · ${n.visits}` : pending ? "…" : (n.score > 0 ? `+${n.score}` : `${n.score}`);
       row.append(id, track, val);
       bars.appendChild(row);
     });
-
-    $("#insightTreeWrap").hidden = !isMcts;
-    if (isMcts) {
-      if (ins.live) $("#insightTreeWrap").open = true;
-      renderTree(ins);
-    }
   }
 
-  function renderTree(ins) {
-    const svg = $("#insightTree");
-    while (svg.firstChild) svg.removeChild(svg.firstChild);
-    const root = ins.root;
-    const W = 640, H = 300;
-    const n = root.length || 1;
-    const colW = W / n;
-    const rootX = W / 2, rootY = 28, childY = 128, grandY = 236;
-    const maxV = Math.max(...root.map((c) => c.visits), 1);
-    const radius = (v, base, span) => base + span * Math.sqrt(v / maxV);
+  /** Persistent SVG tree: nodes and curved links are created once per key and then
+   *  updated, so sizes, colours and positions animate between frames. */
+  function renderTree(ins, isMcts) {
+    const svg = tree.svg;
+    const root = ins.root || [];
+    const seen = new Set();
+    const n = Math.max(root.length, 1);
+    const colW = TREE_W / n;
+    const ROOT_Y = 34, CHILD_Y = 170, GRAND_Y = 330;
+    const maxV = Math.max(1, ...root.map((c) => (isMcts ? c.visits : c.nodes || 0)));
+    const sizeOf = (v, base, span) => base + span * Math.sqrt(Math.max(0, v) / maxV);
+    const pulse = new Set((ins.last_path || []).slice(0, 2).map((m, i) => (i === 0 ? `c:${m[0]},${m[1]}` : `g:${ins.last_path[0][0]},${ins.last_path[0][1]}>${m[0]},${m[1]}`)));
 
-    const label = (x, y, text, cls, size) => {
-      const t = svgEl("text", { x, y, "text-anchor": "middle", "font-size": size || 10, "font-weight": 800,
-        "font-family": "Nunito, Segoe UI, sans-serif", fill: cls === "light" ? "#ffffff" : "#1f2937" }, text);
-      svg.appendChild(t);
+    const upsert = (key, make, update) => {
+      let item = tree.items.get(key);
+      if (!item) { item = make(); tree.items.set(key, item); }
+      update(item, !item.__ready);
+      item.__ready = true;
+      seen.add(key);
+      return item;
+    };
+    const curve = (x1, y1, x2, y2) => {
+      const ym = (y1 + y2) / 2;
+      return `M ${x1} ${y1} C ${x1} ${ym}, ${x2} ${ym}, ${x2} ${y2}`;
+    };
+    const setCircle = (c, cx, cy, r, fill, stroke, sw, fresh) => {
+      c.setAttribute("cx", cx); c.setAttribute("cy", cy);
+      c.setAttribute("fill", fill); c.setAttribute("stroke", stroke); c.setAttribute("stroke-width", sw);
+      if (fresh) { c.setAttribute("r", 0); c.style.r = "0px"; requestAnimationFrame(() => { c.setAttribute("r", r); c.style.r = r + "px"; }); }
+      else { c.setAttribute("r", r); c.style.r = r + "px"; }
+    };
+    const setText = (t, x, y, text, size, color, weight) => {
+      t.setAttribute("x", x); t.setAttribute("y", y); t.setAttribute("font-size", size);
+      t.setAttribute("fill", color); t.setAttribute("font-weight", weight || 700);
+      if (t.textContent !== text) t.textContent = text;
     };
 
-    // links first (behind nodes)
+    // layers: links first, then nodes, then labels
+    const layer = (id) => { let g = svg.querySelector(`#${id}`); if (!g) { g = svgEl("g", { id }); svg.appendChild(g); } return g; };
+    const gLinks = layer("tlinks"), gNodes = layer("tnodes"), gLabels = layer("tlabels");
+
+    const rootX = TREE_W / 2;
+    upsert("root", () => { const c = svgEl("circle", { class: "tnode root" }); gNodes.appendChild(c); return c; },
+      (c, fresh) => setCircle(c, rootX, ROOT_Y, 15, "#0f1d33", "#0f1d33", 0, fresh));
+    upsert("root-label", () => { const t = svgEl("text", { class: "tlabel", "text-anchor": "middle" }); gLabels.appendChild(t); return t; },
+      (t) => setText(t, rootX, ROOT_Y + 4, isMcts ? "now" : "CPU", 9, "#ffffff", 800));
+
     root.forEach((c, i) => {
       const cx = colW * (i + 0.5);
-      svg.appendChild(svgEl("line", { x1: rootX, y1: rootY, x2: cx, y2: childY, stroke: c.best ? "#1a5fd0" : "#cfd6e3", "stroke-width": c.best ? 2.5 : 1.5 }));
-      (c.children || []).forEach((g, j) => {
-        const k = (c.children.length - 1) / 2;
-        const gx = cx + (j - k) * Math.min(colW / 3.2, 22);
-        svg.appendChild(svgEl("line", { x1: cx, y1: childY, x2: gx, y2: grandY, stroke: "#dfe5ef", "stroke-width": 1 }));
+      const key = `c:${c.move[0]},${c.move[1]}`;
+      const pending = !isMcts && (c.score === null || c.score === undefined);
+      const weight = isMcts ? c.visits : (c.nodes || 0);
+      const r = pending ? 6 : sizeOf(weight, 7, 19);
+      let fill, stroke = "#c3cad8", sw = 1.5;
+      if (pending) fill = "#eef1f6";
+      else if (isMcts) fill = mixColor(Math.min(1, Math.max(0, (c.win_rate - 0.25) / 0.5)));
+      else fill = mixColor(Math.min(1, Math.max(0, 0.5 + c.score / 2)));
+      if (c.best) { stroke = "#0f1d33"; sw = 3; }
+
+      upsert(key + ":link", () => { const p = svgEl("path", { class: "tlink", fill: "none" }); gLinks.appendChild(p); return p; },
+        (p) => {
+          p.setAttribute("d", curve(rootX, ROOT_Y + 12, cx, CHILD_Y - r));
+          p.setAttribute("stroke-width", pending ? 1 : 1 + 6 * (weight / maxV));
+          p.classList.toggle("pulse", pulse.has(key));
+          p.classList.toggle("best", !!c.best);
+        });
+      upsert(key, () => { const el = svgEl("circle", { class: "tnode" }); gNodes.appendChild(el); return el; },
+        (el, fresh) => setCircle(el, cx, CHILD_Y, r, fill, stroke, sw, fresh));
+      upsert(key + ":l1", () => { const t = svgEl("text", { class: "tlabel", "text-anchor": "middle" }); gLabels.appendChild(t); return t; },
+        (t) => setText(t, cx, CHILD_Y + 34, `(${c.move[0]},${c.move[1]})`, 11, "#1f2937", 800));
+      upsert(key + ":l2", () => { const t = svgEl("text", { class: "tlabel", "text-anchor": "middle" }); gLabels.appendChild(t); return t; },
+        (t) => setText(t, cx, CHILD_Y + 48, pending ? "…" : isMcts ? `${Math.round(c.win_rate * 100)}% · ${c.visits}` : (c.score > 0 ? `+${c.score}` : `${c.score}`), 10, "#65718a", 700));
+
+      const kids = c.children || [];
+      const m = kids.length;
+      const gap = Math.min(colW / (m + 0.6), 30);
+      kids.forEach((g, j) => {
+        const gx = cx + (j - (m - 1) / 2) * gap;
+        const gkey = `g:${c.move[0]},${c.move[1]}>${g.move[0]},${g.move[1]}`;
+        const pruned = !isMcts && g.pruned;
+        const gw = isMcts ? g.visits : (pruned ? 0 : 1);
+        const gr = isMcts ? Math.max(3.5, sizeOf(g.visits, 2, 10)) : (pruned ? 4 : 6);
+        const gfill = pruned ? "#ffffff" : isMcts ? mixColor(Math.min(1, Math.max(0, (g.win_rate - 0.25) / 0.5))) : mixColor(Math.min(1, Math.max(0, 0.5 - g.score / 2)));
+        upsert(gkey + ":link", () => { const p = svgEl("path", { class: "tlink thin", fill: "none" }); gLinks.appendChild(p); return p; },
+          (p) => {
+            p.setAttribute("d", curve(cx, CHILD_Y + r, gx, GRAND_Y - gr));
+            p.setAttribute("stroke-width", isMcts ? 0.8 + 3 * (gw / Math.max(1, c.visits)) : 1);
+            p.classList.toggle("pulse", pulse.has(gkey));
+            p.classList.toggle("pruned", pruned);
+          });
+        upsert(gkey, () => { const el = svgEl("circle", { class: "tnode small" }); gNodes.appendChild(el); return el; },
+          (el, fresh) => setCircle(el, gx, GRAND_Y, gr, gfill, pruned ? "#c3cad8" : "#ffffff", pruned ? 1.2 : 1, fresh));
+        if (m <= 4) {
+          upsert(gkey + ":l", () => { const t = svgEl("text", { class: "tlabel", "text-anchor": "middle" }); gLabels.appendChild(t); return t; },
+            (t) => setText(t, gx, GRAND_Y + 20, `${g.move[0]},${g.move[1]}`, 8, pruned ? "#a3acbd" : "#65718a", 700));
+        }
       });
     });
 
-    // root
-    svg.appendChild(svgEl("circle", { cx: rootX, cy: rootY, r: 14, fill: "#0f1d33" }));
-    label(rootX, rootY + 4, "root", "light", 9);
+    // drop anything that disappeared (a new search)
+    for (const [key, el] of tree.items) {
+      if (!seen.has(key)) { el.remove(); tree.items.delete(key); }
+    }
+    const legend = $("#treeLegend");
+    legend.textContent = isMcts
+      ? "Top: the CPU's candidate moves. Below each: the replies it explored most. Pulsing path: the latest simulation."
+      : "Top: the CPU's candidate moves (size = positions searched). Below: your replies it examined; hollow = pruned by alpha-beta.";
+  }
 
-    // children + grandchildren
-    root.forEach((c, i) => {
-      const cx = colW * (i + 0.5);
-      const r = radius(c.visits, 7, 16);
-      svg.appendChild(svgEl("circle", { cx, cy: childY, r, fill: c.best ? "#1a5fd0" : "#e6ebf5", stroke: c.best ? "#124aa6" : "#c3cad8", "stroke-width": 1.5 }));
-      label(cx, childY + r + 12, `(${c.move[0]},${c.move[1]})`, "", 10);
-      label(cx, childY + r + 24, `${Math.round(c.win_rate * 100)}% · ${c.visits}`, "", 9);
-      (c.children || []).forEach((g, j) => {
-        const k = (c.children.length - 1) / 2;
-        const gx = cx + (j - k) * Math.min(colW / 3.2, 22);
-        const gr = Math.max(3, radius(g.visits, 2, 9));
-        svg.appendChild(svgEl("circle", { cx: gx, cy: grandY, r: gr, fill: "#f2994a", opacity: 0.85 }));
-      });
-      if (c.children && c.children.length) label(cx, grandY + 24, c.children.map((g) => `(${g.move[0]},${g.move[1]})`).join(" "), "", 8);
-    });
+  function resetTree() {
+    for (const [, el] of tree.items) el.remove();
+    tree.items.clear();
   }
 
   // ---------------------------------------------------------------- render

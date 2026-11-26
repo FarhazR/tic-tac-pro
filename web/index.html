@@ -130,18 +130,20 @@
       </div>
 
       <div class="card insight" id="insight" hidden>
-          <div class="ihead">
-            <span class="ititle">AI insight</span>
-            <span class="imeta" id="insightMeta"></span>
-          </div>
-          <p class="isub" id="insightSub"></p>
-          <div class="ibars" id="insightBars"></div>
-          <details class="itree" id="insightTreeWrap">
-            <summary>Search tree</summary>
-            <div class="itree-scroll"><svg id="insightTree" viewBox="0 0 640 300" width="100%" aria-label="MCTS search tree"></svg></div>
-            <p class="ilegend">Circle size = visits. Blue = the move played. Second row = the best replies the search explored.</p>
-          </details>
+        <div class="ihead">
+          <span class="ititle">AI insight</span>
+          <span class="imeta" id="insightMeta"></span>
         </div>
+        <p class="isub" id="insightSub"></p>
+        <div class="itree-wrap">
+          <svg id="insightTree" viewBox="0 0 760 470" width="100%" aria-label="Search tree"></svg>
+        </div>
+        <p class="ilegend" id="treeLegend"></p>
+        <details class="ibars-wrap">
+          <summary>Scores per move</summary>
+          <div class="ibars" id="insightBars"></div>
+        </details>
+      </div>
 
       <aside class="side">
         <div class="card queue" id="queueX">

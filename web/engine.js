@@ -234,14 +234,46 @@
       const legal = game.getLegalMoves();
       const scores = new Map();
       let i = 0;
+      const detail = new Map();          // "r,c" -> { nodes, replies }
+      // Evaluate one root move exactly as minimax(sim, depth, false) would, but keep the
+      // opponent replies it examined so the UI can draw them.
+      const evalRoot = (m) => {
+        const sim = game.copy();
+        sim.makeMove(m[0], m[1]);
+        const before = self.nodesSearched;
+        self.nodesSearched++;
+        const depth = self.depth;
+        const terminal = self.evaluate(sim);
+        let score;
+        const replies = [];
+        if (terminal !== null) score = terminal * (1 + depth);
+        else if (depth === 0) score = self.heuristic(sim);
+        else {
+          const reps = sim.getLegalMoves();
+          let best = Infinity, alpha = -Infinity, beta = Infinity, cut = false;
+          for (const r of reps) {
+            if (cut) { replies.push({ move: r.slice(), score: null, pruned: true }); continue; }
+            const s2 = sim.copy();
+            s2.makeMove(r[0], r[1]);
+            const v = self.minimax(s2, depth - 1, true, alpha, beta);
+            replies.push({ move: r.slice(), score: Math.round(v * 100) / 100, pruned: false });
+            best = Math.min(best, v);
+            beta = Math.min(beta, best);
+            if (beta <= alpha) cut = true;
+          }
+          score = reps.length ? best : 0;
+        }
+        return { score, replies, nodes: self.nodesSearched - before };
+      };
       const search = {
         scores, total: legal.length, get done() { return i; },
         step(n) {
           for (let k = 0; k < n && i < legal.length; k++, i++) {
             const m = legal[i];
-            const sim = game.copy();
-            sim.makeMove(m[0], m[1]);
-            scores.set(`${m[0]},${m[1]}`, self.minimax(sim, self.depth, false));
+            const key = `${m[0]},${m[1]}`;
+            const r = evalRoot(m);
+            scores.set(key, r.score);
+            detail.set(key, r);
           }
           return i >= legal.length;
         },
@@ -252,8 +284,10 @@
             type: "minimax", depth: self.depth, nodes: self.nodesSearched, done: i, total: legal.length,
             root: legal.map((m) => {
               const k = `${m[0]},${m[1]}`;
+              const d = detail.get(k);
               const s = scores.has(k) ? Math.round(scores.get(k) * 100) / 100 : null;
-              return { move: m.slice(), score: s, best: s !== null && scores.get(k) === best, pending: !scores.has(k) };
+              return { move: m.slice(), score: s, best: s !== null && scores.get(k) === best, pending: !scores.has(k),
+                nodes: d ? d.nodes : 0, children: d ? d.replies : [] };
             }),
           };
         },
@@ -351,6 +385,7 @@
       const root = new MCTSNode(game.copy());
       let done = 0;
       const wr = (n) => (n.visits ? Math.round((n.wins / n.visits) * 100) / 100 : 0);
+      let lastPath = [];
       const search = {
         root, total: this.simulations, get done() { return done; },
         step(n) {
@@ -360,6 +395,7 @@
             while (!node.untried.length && node.children.length) { node = self.select(node); path.push(node); }
             if (node.untried.length) { node = self.expand(node); path.push(node); }
             self.backpropagate(path, self.rollout(node.game));
+            lastPath = path.slice(1).map((p) => p.move.slice());
           }
           return done >= self.simulations;
         },
@@ -368,9 +404,10 @@
           const ordered = [...root.children].sort((a, b) => (a.move[0] - b.move[0]) || (a.move[1] - b.move[1]));
           return {
             type: "mcts", simulations: self.simulations, nodes: self.nodesSearched, done, total: self.simulations,
+            last_path: lastPath,
             root: ordered.map((c) => ({
               move: c.move.slice(), visits: c.visits, win_rate: wr(c), best: c.visits === most && most > 0,
-              children: [...c.children].sort((a, b) => b.visits - a.visits).slice(0, 3)
+              children: [...c.children].sort((a, b) => b.visits - a.visits).slice(0, 4)
                 .map((g) => ({ move: g.move.slice(), visits: g.visits, win_rate: wr(g) })),
             })),
           };

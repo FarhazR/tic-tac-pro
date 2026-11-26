@@ -60,22 +60,40 @@ class Game:
         return copy.deepcopy(self)
 
     def get_legal_moves(self):
-            legal_moves = []
-    
-            for row in range(3):
-                for col in range(3):
-                    if self.board.is_empty(row, col):
-                        legal_moves.append((row, col))
-    
-            return legal_moves
+        legal_moves = []
+
+        for row in range(3):
+            for col in range(3):
+                if self.board.is_empty(row, col):
+                    legal_moves.append((row, col))
+
+        return legal_moves
 
     def end_in_draw(self):
         if self.game_over:
             return False
-    
+
         self.game_over = True
         self.draw = True
         return True
+
+    def state_key(self):
+        """Hashable description of the *complete* game state.
+
+        The board alone does not identify a Tic-Tac-Pro position: two games
+        with identical boards can have different move queues and therefore
+        different symbols expiring next. Search algorithms (transposition
+        tables, MCTS nodes, repetition detection) should key on this.
+        """
+        return (
+            tuple(tuple(row) for row in self.board.grid),
+            tuple(self.player1.moves),
+            tuple(self.player2.moves),
+            self.current_player.symbol,
+            self.game_over,
+            self.winner,
+            self.draw,
+        )
 
     def get_opponent(self):
         if self.current_player == self.player1:

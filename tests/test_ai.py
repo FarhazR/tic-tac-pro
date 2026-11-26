@@ -258,7 +258,9 @@ def test_minimax_detects_immediate_winning_state():
     simulated_game = game.copy()
     simulated_game.make_move(0, 2)
 
-    assert ai._minimax(simulated_game, 3, False) == 1
+    # A won position scores positive; the magnitude grows with the depth
+    # remaining so that faster wins are preferred over slower ones.
+    assert ai._minimax(simulated_game, 3, False) > 0
 
 def test_minimax_ai_has_default_search_depth():
     ai = MinimaxAI()
@@ -314,7 +316,10 @@ def test_minimax_ai_accounts_for_future_expiration():
 
     # (2,2) looks reasonable on the current board,
     # but Minimax sees that it eventually leads to a loss.
-    assert ai.choose_move(game) == (0, 1)
+    scores = ai.score_moves(game)
+
+    assert scores[(2, 2)] < 0
+    assert ai.choose_move(game) != (2, 2)
 
 def test_minimax_ai_finds_win_after_expiration():
     game = Game()
@@ -335,54 +340,105 @@ def test_minimax_ai_finds_win_after_expiration():
     game.make_move(1, 2)
 
     ai = MinimaxAI(depth=3)
+    scores = ai.score_moves(game)
 
-    assert ai.choose_move(game) == (0, 1)
+    # (2,0) wins immediately. (0,1) also wins, but only after X's oldest
+    # symbol (1,1) expires and O can take the centre. Both must be seen as
+    # winning, and the immediate win must be preferred.
+    assert scores[(2, 0)] > 0
+    assert scores[(0, 1)] > 0
+    assert scores[(2, 0)] > scores[(0, 1)]
+    assert ai.choose_move(game) == (2, 0)
+
+
+def test_minimax_ai_randomizes_between_equal_moves():
+    # With the centre taken and no lookahead, every reply scores the same,
+    # so over many calls the AI should not always pick the same cell.
+    game = Game()
+    game.make_move(1, 1)
+
+    ai = MinimaxAI(depth=0)
+    scores = ai.score_moves(game)
+
+    assert len(set(scores.values())) == 1
+
+    choices = {ai.choose_move(game) for _ in range(40)}
+
+    assert len(choices) > 1
+
+
+def test_minimax_alpha_beta_matches_plain_search():
+    # Pruning must not change the root scores, only the work done.
+    game = Game()
+    for move in [(1, 1), (0, 0), (2, 2)]:
+        game.make_move(*move)
+
+    ai = MinimaxAI(depth=3)
+    pruned = ai.score_moves(game)
+
+    def plain(g, depth, maximizing):
+        score = ai._evaluate(g)
+        if score is not None:
+            return score * (1 + depth)
+        if depth == 0:
+            return ai._heuristic(g)
+        results = []
+        for m in g.get_legal_moves():
+            s = g.copy()
+            s.make_move(*m)
+            results.append(plain(s, depth - 1, not maximizing))
+        return max(results) if maximizing else min(results)
+
+    for move, score in pruned.items():
+        s = game.copy()
+        s.make_move(*move)
+        assert plain(s, ai.depth, False) == score
+
 
 def test_game_state_can_repeat():
+    """A complete game state (board + both queues + turn) can recur.
+
+    X rotates through four cells A, B, C, D and O through four cells
+    E, F, G, H. No three of either player's four cells form a line, so
+    nobody ever wins, and after eight plies the position repeats exactly.
+    This is why AI simulations need a ply cap or a repetition rule.
+    """
     game = Game()
 
-    seen_states = set()
+    x_cells = [(0, 0), (0, 1), (1, 0), (2, 2)]
+    o_cells = [(0, 2), (1, 2), (2, 0), (2, 1)]
 
-    def get_state(game):
-        board = tuple(
-            tuple(row)
-            for row in game.board.board
-        )
+    seen_states = {game.state_key(): 0}
+    first_repeat = None
 
-        x_queue = tuple(game.player1.moves)
-        o_queue = tuple(game.player2.moves)
+    for ply in range(1, 25):
+        cells = x_cells if game.current_player is game.player1 else o_cells
+        move = cells[(ply - 1) // 2 % 4]
 
-        current_player = game.current_player.symbol
+        assert game.make_move(*move), f"move {move} at ply {ply} was rejected"
+        assert not game.game_over
 
-        return (
-            board,
-            x_queue,
-            o_queue,
-            current_player,
-            game.game_over,
-            game.winner,
-            game.draw,
-        )
-
-    # Record the initial state
-    seen_states.add(get_state(game))
-
-    # Make a sequence of legal moves.
-    for _ in range(30):
-        legal_moves = game.get_legal_moves()
-
-        if not legal_moves or game.game_over:
-            break
-
-        game.make_move(*legal_moves[0])
-
-        state = get_state(game)
+        state = game.state_key()
 
         if state in seen_states:
-            print("\nREPEATED STATE FOUND")
-            print("State:", state)
-            return
+            first_repeat = (seen_states[state], ply)
+            break
 
-        seen_states.add(state)
+        seen_states[state] = ply
 
-    print("\nNo repeated state found.")
+    assert first_repeat == (6, 14)
+
+
+def test_state_key_distinguishes_same_board_different_queues():
+    # Both games end with X on (0,0),(0,1) and O on (1,0),(1,1), but the
+    # order X placed them differs, so a different symbol expires next.
+    game_a = Game()
+    for move in [(0, 0), (1, 0), (0, 1), (1, 1)]:
+        game_a.make_move(*move)
+
+    game_b = Game()
+    for move in [(0, 1), (1, 0), (0, 0), (1, 1)]:
+        game_b.make_move(*move)
+
+    assert game_a.board.grid == game_b.board.grid
+    assert game_a.state_key() != game_b.state_key()

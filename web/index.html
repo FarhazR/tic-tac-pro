@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1A5FD0">
+  <meta name="description" content="Tic-Tac-Toe where your oldest symbol expires. Play a friend or a Minimax AI.">
+  <title>Tic-Tac-Pro</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231A5FD0'/%3E%3Cpath d='M20 20l24 24M44 20L20 44' stroke='white' stroke-width='8' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@500;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <header class="hero">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">
+          <i class="x">X</i><i></i><i class="o">O</i>
+          <i></i><i class="x">X</i><i></i>
+          <i class="o">O</i><i></i><i class="x fade">X</i>
+        </div>
+        <div>
+          <h1>Tic-Tac-Pro</h1>
+          <p class="tagline">Three symbols each. Place a fourth and your <b>oldest</b> one vanishes.</p>
+        </div>
+      </div>
+      <details class="rules">
+        <summary>How to play</summary>
+        <ol>
+          <li>Take turns placing your symbol in an empty cell.</li>
+          <li>You can only have <b>three</b> symbols on the board. Your fourth move removes your oldest one.</li>
+          <li>The win is checked <b>after</b> the removal, so a line can disappear as you make it.</li>
+          <li>The dashed cell is your oldest symbol. It is the one that expires next.</li>
+        </ol>
+      </details>
+    </header>
+
+    <section class="card setup" id="setup">
+      <div class="setup-row">
+        <div class="field">
+          <span class="label">Mode</span>
+          <div class="seg" role="radiogroup" aria-label="Game mode">
+            <button type="button" data-mode="pvp" class="active">Two players</button>
+            <button type="button" data-mode="pvc">Versus CPU</button>
+          </div>
+        </div>
+        <div class="field" id="difficultyField" hidden>
+          <span class="label">CPU</span>
+          <div class="seg" role="radiogroup" aria-label="CPU difficulty">
+            <button type="button" data-difficulty="random">Random</button>
+            <button type="button" data-difficulty="rule">Rule-Based</button>
+            <button type="button" data-difficulty="minimax" class="active">Minimax</button>
+            <button type="button" data-difficulty="mcts">MCTS</button>
+          </div>
+          <label class="depth" id="depthField">Depth
+            <input type="number" id="depth" min="1" max="5" value="3" inputmode="numeric">
+          </label>
+          <label class="depth" id="simsField" hidden>Simulations
+            <select id="sims">
+              <option value="200">200</option>
+              <option value="500" selected>500</option>
+              <option value="1000">1000</option>
+              <option value="2000">2000</option>
+            </select>
+          </label>
+        </div>
+        <button type="button" class="primary" id="newGame">Start game</button>
+      </div>
+      <p class="lock-note" id="lockNote" hidden>
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M17 9V7a5 5 0 0 0-10 0v2H5v12h14V9h-2Zm-8 0V7a3 3 0 0 1 6 0v2H9Z"/></svg>
+        Settings are locked while a game is in progress. Restart to change them.
+      </p>
+    </section>
+
+    <section class="arena">
+      <div class="card board-card">
+        <div class="players">
+          <div class="player x" id="playerX">
+            <span class="avatar">X</span>
+            <div class="pinfo"><b id="nameX">Player X</b><span class="pscore"><em id="scoreX">0</em> wins</span></div>
+          </div>
+          <div class="draws"><em id="scoreDraw">0</em><span>draws</span></div>
+          <div class="player o" id="playerO">
+            <div class="pinfo right"><b id="nameO">Player O</b><span class="pscore"><em id="scoreO">0</em> wins</span></div>
+            <span class="avatar">O</span>
+          </div>
+        </div>
+
+        <div class="status" id="status" aria-live="polite">Pick a mode and press Start.</div>
+
+        <div class="board idle" id="board" aria-label="Board"></div>
+
+        <div class="actions">
+          <button type="button" id="offerDraw" disabled>Offer draw</button>
+          <label class="toggle" id="scoresToggleWrap" hidden>
+            <input type="checkbox" id="showScores"> <span id="scoresLabel">AI scores</span>
+          </label>
+        </div>
+      </div>
+
+      <aside class="side">
+        <div class="card queue" id="queueX">
+          <div class="qhead"><span class="sym x">X</span><span>active symbols</span><span class="qhint">oldest first</span></div>
+          <div class="chips"></div>
+        </div>
+        <div class="card queue" id="queueO">
+          <div class="qhead"><span class="sym o">O</span><span>active symbols</span><span class="qhint">oldest first</span></div>
+          <div class="chips"></div>
+        </div>
+        <div class="card log" id="log"><p class="muted">Moves will appear here.</p></div>
+      </aside>
+    </section>
+
+    <!-- end-of-game screen with a "cut" transition -->
+    <div class="overlay" id="overlay" hidden>
+      <div class="cut cut-a"></div>
+      <div class="cut cut-b"></div>
+      <div class="confetti" id="confetti" aria-hidden="true"></div>
+      <div class="overlay-card" role="dialog" aria-modal="true" aria-labelledby="overlayTitle">
+        <div class="big-sym" id="bigSym">X</div>
+        <h2 id="overlayTitle">Player X wins!</h2>
+        <p id="overlaySub"></p>
+        <div class="overlay-actions">
+          <button type="button" class="primary" id="playAgain">Play again</button>
+          <button type="button" id="closeOverlay">See the board</button>
+        </div>
+      </div>
+    </div>
+
+    <dialog id="drawDialog">
+      <form method="dialog">
+        <p id="drawText">Player O, do you accept the draw?</p>
+        <menu>
+          <button value="decline">Decline</button>
+          <button value="accept" class="primary">Accept</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <p class="backend-note" id="backendNote"></p>
+
+    <dialog id="restartDialog">
+      <form method="dialog">
+        <p>Restart now? The current game will be lost.</p>
+        <menu>
+          <button value="cancel">Keep playing</button>
+          <button value="restart" class="primary">Restart</button>
+        </menu>
+      </form>
+    </dialog>
+  </main>
+  <script src="engine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

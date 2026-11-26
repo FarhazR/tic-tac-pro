@@ -1,5 +1,50 @@
 from src.game import Game
-from src.ai import RandomAI, RuleBasedAI
+from src.ai import MCTS_AI, MinimaxAI, RandomAI, RuleBasedAI
+
+
+DIFFICULTIES = {
+    "1": ("Random", lambda: RandomAI()),
+    "2": ("Rule-Based", lambda: RuleBasedAI()),
+    "3": ("Minimax (depth 3)", lambda: MinimaxAI(depth=3)),
+    "4": ("MCTS (500 simulations)", lambda: MCTS_AI(simulations=500)),
+}
+
+
+def choose_option(prompt, valid):
+    while True:
+        choice = input(prompt)
+
+        if choice in valid:
+            return choice
+
+        print(f"Invalid choice. Please enter one of: {', '.join(valid)}.")
+
+
+def handle_draw_offer(game, offering_player, ai):
+    """Resolve a draw offer. Returns True if the game ended in a draw."""
+    responder = game.get_opponent()
+
+    print()
+    print(f"Player {offering_player.symbol} offers a draw.")
+
+    # The CPU answers for itself; it never accepts an offered draw.
+    if ai is not None and responder is game.player2:
+        print(f"CPU ({responder.symbol}) declines the draw.")
+        return False
+
+    response = choose_option(
+        f"Player {responder.symbol}, accept the draw? "
+        "Enter 0 to decline, 1 to accept: ",
+        ("0", "1"),
+    )
+
+    if response == "1":
+        game.end_in_draw()
+        print("Draw offer accepted. Game ends in a draw.")
+        return True
+
+    print("Draw offer declined.")
+    return False
 
 
 def main():
@@ -12,13 +57,7 @@ def main():
     print("2. Player vs CPU")
     print()
 
-    while True:
-        mode = input("Enter 1 or 2: ")
-
-        if mode in ("1", "2"):
-            break
-
-        print("Invalid choice. Please enter 1 or 2.")
+    mode = choose_option("Enter 1 or 2: ", ("1", "2"))
 
     game = Game()
     ai = None
@@ -26,23 +65,14 @@ def main():
     if mode == "2":
         print()
         print("Select CPU difficulty:")
-        print("1. Random")
-        print("2. Rule-Based")
+        for key, (name, _) in DIFFICULTIES.items():
+            print(f"{key}. {name}")
         print()
 
-        while True:
-            difficulty = input("Enter 1 or 2: ")
-
-            if difficulty == "1":
-                ai = RandomAI()
-                break
-
-            if difficulty == "2":
-                ai = RuleBasedAI()
-                break
-
-            print("Invalid choice. Please enter 1 or 2.")
-
+        difficulty = choose_option("Enter 1, 2, 3 or 4: ", tuple(DIFFICULTIES))
+        name, factory = DIFFICULTIES[difficulty]
+        ai = factory()
+        print(f"CPU difficulty: {name}")
 
     print()
     print("Enter row and column as two numbers.")
@@ -62,7 +92,7 @@ def main():
             print(f"Expiring move: {player.moves[0]}")
 
         # CPU turn
-        if mode == "2" and player == game.player2:
+        if ai is not None and player is game.player2:
             move = ai.choose_move(game)
 
             if move is None:
@@ -76,45 +106,26 @@ def main():
         else:
             user_input = input("Enter row and column: ")
 
-            # Try to interpret the input
             try:
                 row, col = map(int, user_input.split())
             except ValueError:
                 print("Invalid input. Please enter two numbers, e.g. 1 2.")
                 continue
 
-            # Check for draw offer
             if row == 9 and col == 9:
-                print()
-                print(f"Player {player.symbol} offers a draw.")
-
-                opponent = game.player2 if player == game.player1 else game.player1
-                while True:
-                    response = input(
-                        f"Player {opponent.symbol} has offered a draw."
-                        "Accept? Enter 0 to decline, 1 to accept: "
-                    )
-                    if response == "0":
-                        print("Draw offer declined.")
-                        break
-                    elif response == "1":
-                        print("Draw offer accepted. Game ends in a draw.")
-                        game.end_in_draw()
-                        break
-                    else:
-                        print("Invalid input. Please enter 0 or 1.")
+                handle_draw_offer(game, player, ai)
                 continue
 
-        # Attempt to make the move
         if not game.make_move(row, col):
             print("Invalid move. The cell may be occupied or coordinates invalid.")
             continue
 
-        # Check whether the move ended the game
-        if game.game_over:
-            game.board.display()
-            print(f"Player {player.symbol} wins!")
-            break
+    game.board.display()
+
+    if game.draw:
+        print("Game over: draw.")
+    elif game.winner is not None:
+        print(f"Player {game.winner} wins!")
 
 
 if __name__ == "__main__":

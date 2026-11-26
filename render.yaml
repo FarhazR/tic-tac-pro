@@ -1,0 +1,15 @@
+# Render Blueprint: deploys the Tic-Tac-Pro server (game API + online rooms).
+# Dashboard -> New -> Blueprint -> pick this repository. Render asks for the
+# DATABASE_URL value on first deploy (it is never stored in git).
+services:
+  - type: web
+    name: tic-tac-pro
+    runtime: docker
+    plan: free
+    branch: fix/audit-issues
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: PYTHONUNBUFFERED
+        value: "1"

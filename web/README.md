@@ -7,7 +7,7 @@ sdk: static
 app_file: index.html
 pinned: false
 license: mit
-short_description: Tic-Tac-Toe where your oldest symbol expires. Play the Minimax AI.
+short_description: Tic-Tac-Toe where your oldest symbol expires
 ---
 
 # Tic-Tac-Pro (static build)

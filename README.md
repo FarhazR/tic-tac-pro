@@ -7,7 +7,7 @@ sdk: docker
 app_port: 7860
 pinned: false
 license: mit
-short_description: Tic-Tac-Toe where your oldest symbol expires. Play the Minimax AI.
+short_description: Tic-Tac-Toe where your oldest symbol expires
 ---
 
 # Tic-Tac-Pro

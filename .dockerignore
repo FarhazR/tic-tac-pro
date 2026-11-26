@@ -1,0 +1,10 @@
+.git
+.gitignore
+__pycache__
+**/__pycache__
+.pytest_cache
+tests
+*.md
+run.bat
+pytest.ini
+requirements.txt

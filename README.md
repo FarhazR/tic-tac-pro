@@ -1,3 +1,15 @@
+---
+title: Tic-Tac-Pro
+emoji: ⭕
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+license: mit
+short_description: Tic-Tac-Toe where your oldest symbol expires. Play the Minimax AI.
+---
+
 # Tic-Tac-Pro
 
 Tic-Tac-Toe on a 3×3 board where each player may hold at most **three active
@@ -39,13 +51,50 @@ This starts one local process that serves the web UI **and** the game API
 On Windows you can also double-click `run.bat`. Options: `--port 9000`,
 `--no-browser`.
 
-Pick Player vs Player or Player vs CPU (Random, Rule-Based or Minimax with a
-depth), click cells to play, and use *Offer draw* as in the terminal game. The
+Pick two players or versus CPU (Random, Rule-Based or Minimax with a depth),
+press *Start game*, click cells to play, and use *Offer draw* as in the terminal
+game. Settings lock while a game is in progress; *Restart* unlocks them. The
 cell holding the current player's oldest symbol is dashed, and against Minimax
-you can tick *show Minimax scores* to see the root score it gave every cell.
+you can tick *Minimax scores* to see the root score it gave every cell. Wins
+and draws are counted per browser tab.
 
-The server is `src/server.py` (`Session` + a JSON API: `/api/state`,
-`/api/new`, `/api/move`, `/api/cpu`, `/api/draw`); the UI is `web/`.
+The server is `src/server.py` (one `Session` per visitor, keyed by an
+`X-Session-Id` header the page generates, plus a JSON API: `/api/state`,
+`/api/new`, `/api/move`, `/api/cpu`, `/api/draw`, `/api/health`); the UI is
+`web/`. It is plain `http.server`, so it needs no packages.
+
+## Deploy to Hugging Face Spaces
+
+The repo already contains the three things a Docker Space needs: the YAML
+front matter at the top of this README (`sdk: docker`, `app_port: 7860`), a
+`Dockerfile`, and a server that binds `0.0.0.0:7860` when `HOST`/`PORT` are set.
+
+1. Create a Space at https://huggingface.co/new-space with **SDK: Docker**
+   (template *Blank*), public or private as you like.
+2. Push this repository to it:
+
+   ```powershell
+   git remote add hf https://huggingface.co/spaces/<your-user>/<space-name>
+   git push hf fix/audit-issues:main
+   ```
+
+   Use a Hugging Face access token with *write* permission as the password
+   when git asks. (Or upload the files through the Space's *Files* tab:
+   `Dockerfile`, `README.md`, `run.py`, `src/`, `web/`.)
+3. The Space builds the image and starts `python run.py --no-browser`; the
+   *Logs* tab shows `Tic-Tac-Pro running at http://0.0.0.0:7860`. Open the
+   Space URL and play.
+
+Notes: each visitor gets their own game (sessions expire after two hours of
+inactivity); Minimax depth is capped at 5 so a CPU move stays well under a
+second on the free CPU tier; nothing is written to disk.
+
+Run the same container locally:
+
+```powershell
+docker build -t tic-tac-pro .
+docker run --rm -p 7860:7860 tic-tac-pro
+```
 
 ## Play in the terminal
 

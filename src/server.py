@@ -1,13 +1,18 @@
-"""Local web server for Tic-Tac-Pro.
+"""Local / hosted web server for Tic-Tac-Pro.
 
 Serves the browser UI from ``web/`` and a small JSON API that drives the
 same ``Game`` engine and AI players the terminal version uses. Standard
 library only: no extra dependencies.
 
-    python run.py            # from the repository root
+    python run.py                                   # local
+    python run.py --host 0.0.0.0 --port 7860        # container / Hugging Face
 
-API (all JSON):
-    GET  /api/state                     current state
+Every browser tab is its own game: the client sends an ``X-Session-Id``
+header (a random id it keeps in sessionStorage) and the server keeps one
+``Session`` per id, expiring idle ones.
+
+API (all JSON, all need ``X-Session-Id``):
+    GET  /api/state                     current state, 404 if no game yet
     POST /api/new   {mode, difficulty, depth}
                     mode: "pvp" | "pvc";  difficulty: "random" | "rule" | "minimax"
     POST /api/move  {row, col}          human move
@@ -17,6 +22,7 @@ API (all JSON):
 """
 import json
 import random
+import re
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -33,12 +39,29 @@ DIFFICULTIES = {
     "minimax": ("Minimax", lambda depth: MinimaxAI(depth=depth)),
 }
 
+LINES = (
+    ((0, 0), (0, 1), (0, 2)), ((1, 0), (1, 1), (1, 2)), ((2, 0), (2, 1), (2, 2)),
+    ((0, 0), (1, 0), (2, 0)), ((0, 1), (1, 1), (2, 1)), ((0, 2), (1, 2), (2, 2)),
+    ((0, 0), (1, 1), (2, 2)), ((0, 2), (1, 1), (2, 0)),
+)
+
+MAX_DEPTH = 5  # keeps a hosted CPU move well under a second
+
+
+def winning_line(board, symbol):
+    for line in LINES:
+        if all(board.grid[r][c] == symbol for r, c in line):
+            return [list(cell) for cell in line]
+    return None
+
 
 class Session:
-    """One game plus the settings around it. Thread-safe via ``lock``."""
+    """One visitor: the current game, its settings and a running score.
+    Thread-safe via ``lock``."""
 
     def __init__(self):
         self.lock = threading.Lock()
+        self.score = {"X": 0, "O": 0, "draw": 0}
         self.new_game()
 
     # ------------------------------------------------------------ control
@@ -47,7 +70,10 @@ class Session:
             raise ValueError("mode must be 'pvp' or 'pvc'")
         if difficulty not in DIFFICULTIES:
             raise ValueError("difficulty must be one of: " + ", ".join(DIFFICULTIES))
-        depth = max(1, min(int(depth), 6))
+        try:
+            depth = max(1, min(int(depth), MAX_DEPTH))
+        except (TypeError, ValueError):
+            raise ValueError("depth must be an integer")
 
         self.game = Game()
         self.mode = mode
@@ -59,6 +85,7 @@ class Session:
             self.difficulty = difficulty
             self.difficulty_name, factory = DIFFICULTIES[difficulty]
             self.ai = factory(depth)
+        self.ply = 0
         self.last_move = None
         self.ai_scores = None
         self.ai_time_ms = None
@@ -73,6 +100,7 @@ class Session:
         if not game.make_move(row, col):
             return False
 
+        self.ply += 1
         expired = oldest if oldest is not None and game.board.is_empty(*oldest) else None
         self.last_move = {
             "player": player.symbol,
@@ -81,7 +109,8 @@ class Session:
             "by": by,
         }
         if game.winner is not None:
-            who = "CPU" if (by == "cpu") else f"Player {game.winner}"
+            self.score[game.winner] += 1
+            who = "CPU" if by == "cpu" else f"Player {game.winner}"
             self.message = f"{who} ({game.winner}) wins!"
         else:
             self.message = f"{game.current_player.symbol} to move."
@@ -115,8 +144,7 @@ class Session:
         if hasattr(self.ai, "score_moves"):
             scores = self.ai.score_moves(game)
             best = max(scores.values())
-            best_moves = [m for m, s in scores.items() if s == best]
-            move = random.choice(best_moves)
+            move = random.choice([m for m, s in scores.items() if s == best])
         else:
             move = self.ai.choose_move(game)
         self.ai_time_ms = round((time.perf_counter() - start) * 1000, 1)
@@ -137,6 +165,7 @@ class Session:
             return {"accepted": False, **self.state()}
         if accept:
             game.end_in_draw()
+            self.score["draw"] += 1
             self.message = "Draw agreed. Game over."
             return {"accepted": True, **self.state()}
         self.message = f"Draw declined. {game.current_player.symbol} to move."
@@ -160,7 +189,11 @@ class Session:
             "legal_moves": [list(m) for m in game.get_legal_moves()],
             "game_over": game.game_over,
             "winner": game.winner,
+            "winning_line": winning_line(game.board, game.winner) if game.winner else None,
             "draw": game.draw,
+            "ply": self.ply,
+            "in_progress": self.ply > 0 and not game.game_over,
+            "score": dict(self.score),
             "mode": self.mode,
             "difficulty": self.difficulty,
             "difficulty_name": self.difficulty_name,
@@ -175,7 +208,47 @@ class Session:
         }
 
 
-SESSION = Session()
+class SessionStore:
+    """Sessions keyed by the client's id; idle ones expire."""
+
+    def __init__(self, ttl_seconds=2 * 3600, max_sessions=2000):
+        self.ttl = ttl_seconds
+        self.max_sessions = max_sessions
+        self._sessions = {}   # sid -> [Session, last_seen]
+        self._lock = threading.Lock()
+
+    def get(self, sid):
+        with self._lock:
+            entry = self._sessions.get(sid)
+            if entry is None:
+                return None
+            entry[1] = time.time()
+            return entry[0]
+
+    def get_or_create(self, sid):
+        with self._lock:
+            entry = self._sessions.get(sid)
+            if entry is None:
+                self._prune_locked()
+                entry = self._sessions[sid] = [Session(), time.time()]
+            entry[1] = time.time()
+            return entry[0]
+
+    def __len__(self):
+        with self._lock:
+            return len(self._sessions)
+
+    def _prune_locked(self):
+        now = time.time()
+        for sid in [s for s, (_, seen) in self._sessions.items() if now - seen > self.ttl]:
+            del self._sessions[sid]
+        while len(self._sessions) >= self.max_sessions:
+            oldest = min(self._sessions, key=lambda s: self._sessions[s][1])
+            del self._sessions[oldest]
+
+
+STORE = SessionStore()
+SID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -203,6 +276,8 @@ class Handler(SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         if length == 0:
             return {}
+        if length > 4096:
+            raise ValueError("Body too large.")
         raw = self.rfile.read(length)
         try:
             data = json.loads(raw.decode("utf-8"))
@@ -212,12 +287,27 @@ class Handler(SimpleHTTPRequestHandler):
             raise ValueError("Body must be a JSON object.")
         return data
 
+    def _sid(self):
+        sid = self.headers.get("X-Session-Id", "")
+        if not SID_RE.match(sid):
+            raise ValueError("Missing or invalid X-Session-Id header.")
+        return sid
+
     # -------------------------------------------------------- routes
     def do_GET(self):
-        if self.path.split("?")[0] == "/api/state":
-            with SESSION.lock:
-                return self._json(200, SESSION.state())
-        if self.path.startswith("/api/"):
+        path = self.path.split("?")[0]
+        if path == "/api/state":
+            try:
+                session = STORE.get(self._sid())
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
+            if session is None:
+                return self._json(404, {"error": "No game yet. Start a new one."})
+            with session.lock:
+                return self._json(200, session.state())
+        if path == "/api/health":
+            return self._json(200, {"ok": True, "sessions": len(STORE)})
+        if path.startswith("/api/"):
             return self._json(404, {"error": "Unknown endpoint."})
         return super().do_GET()
 
@@ -225,19 +315,27 @@ class Handler(SimpleHTTPRequestHandler):
         path = self.path.split("?")[0]
         try:
             data = self._read_json()
-            with SESSION.lock:
-                if path == "/api/new":
-                    result = SESSION.new_game(
+            sid = self._sid()
+            if path == "/api/new":
+                session = STORE.get_or_create(sid)
+                with session.lock:
+                    result = session.new_game(
                         mode=data.get("mode", "pvp"),
                         difficulty=data.get("difficulty", "minimax"),
                         depth=data.get("depth", 3),
                     )
-                elif path == "/api/move":
-                    result = SESSION.human_move(data.get("row"), data.get("col"))
+                return self._json(200, result)
+
+            session = STORE.get(sid)
+            if session is None:
+                return self._json(404, {"error": "No game yet. Start a new one."})
+            with session.lock:
+                if path == "/api/move":
+                    result = session.human_move(data.get("row"), data.get("col"))
                 elif path == "/api/cpu":
-                    result = SESSION.cpu_move()
+                    result = session.cpu_move()
                 elif path == "/api/draw":
-                    result = SESSION.offer_draw(bool(data.get("accept", False)))
+                    result = session.offer_draw(bool(data.get("accept", False)))
                 else:
                     return self._json(404, {"error": "Unknown endpoint."})
             return self._json(200, result)
@@ -247,7 +345,8 @@ class Handler(SimpleHTTPRequestHandler):
 
 def serve(host="127.0.0.1", port=8000):
     server = ThreadingHTTPServer((host, port), Handler)
-    print(f"Tic-Tac-Pro running at http://{host}:{port}  (Ctrl+C to stop)")
+    server.daemon_threads = True
+    print(f"Tic-Tac-Pro running at http://{host}:{port}  (Ctrl+C to stop)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

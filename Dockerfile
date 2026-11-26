@@ -2,6 +2,8 @@
 FROM python:3.12-slim
 
 WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir "psycopg[binary]>=3.1"
 COPY src ./src
 COPY web ./web
 COPY run.py ./

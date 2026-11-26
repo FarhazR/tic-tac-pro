@@ -1,4 +1,9 @@
-/* Tic-Tac-Pro browser UI. Talks to the Python server in src/server.py. */
+/* Tic-Tac-Pro browser UI.
+ * Three ways to play: two players on one device, versus the CPU, or an online
+ * room (two devices). Local modes talk to the Python server in src/server.py
+ * or, on a static host, to the in-browser engine in engine.js. Online rooms
+ * always need the Python server (TTP_CONFIG.backend on a static host).
+ */
 (function () {
   "use strict";
 
@@ -15,6 +20,9 @@
   const restartDialog = $("#restartDialog");
   const overlay = $("#overlay");
 
+  const CONFIG = window.TTP_CONFIG || {};
+  const BACKEND = (CONFIG.backend || "").replace(/\/$/, "");
+
   // ---------------------------------------------------------------- session id (one game per tab)
   const SID_KEY = "ttp-sid";
   let sid = null;
@@ -30,23 +38,202 @@
   let score = { X: 0, O: 0, draw: 0 };
   let busy = false;
   let animate = false;
+  let lastAnimKey = null;    // "round:ply" of the last move already animated
 
   // ---------------------------------------------------------------- api
-  // "remote": the Python server in src/server.py.  "local": the JavaScript port
-  // in engine.js, used on static hosts (no server) or when the server is down.
+  // "remote": the Python server.  "local": engine.js, used on static hosts.
   let backend = "remote";
+
+  async function request(url, body, extraHeaders) {
+    const res = await fetch(url, {
+      method: body === undefined ? "GET" : "POST",
+      headers: Object.assign({ "Content-Type": "application/json", "X-Session-Id": sid }, extraHeaders || {}),
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (e) { data = {}; }
+    if (!res.ok) { const err = new Error(data.error || `Request failed (${res.status})`); err.status = res.status; throw err; }
+    return data;
+  }
 
   async function api(path, body) {
     if (backend === "local") return window.TicTacPro.localApi(path, body);
-    const res = await fetch(path, {
-      method: body === undefined ? "GET" : "POST",
-      headers: { "Content-Type": "application/json", "X-Session-Id": sid },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (!res.ok) { const err = new Error(data.error || "Request failed"); err.status = res.status; throw err; }
-    return data;
+    return request(path, body);
   }
+
+  // ---------------------------------------------------------------- online rooms
+  const ROOM_KEY = "ttp-room";
+  const online = { code: null, token: null, role: null, name: null, view: null, timer: null, askedDraw: null, shownOver: null };
+  const onlinePanel = $("#onlinePanel");
+  const lobby = $("#lobby");
+  const roomBox = $("#roomBox");
+  const roomStatus = $("#roomStatus");
+  const hostActions = $("#hostActions");
+  const onlineError = $("#onlineError");
+  const nameInput = $("#playerName");
+  const codeInput = $("#joinCode");
+
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(ROOM_KEY) || "null");
+    if (saved && saved.code && saved.token) Object.assign(online, saved);
+    const savedName = localStorage.getItem("ttp-name");
+    if (savedName) nameInput.value = savedName;
+  } catch (e) { /* ignore */ }
+
+  function saveRoom() {
+    try {
+      if (online.code) sessionStorage.setItem(ROOM_KEY, JSON.stringify({ code: online.code, token: online.token, role: online.role, name: online.name }));
+      else sessionStorage.removeItem(ROOM_KEY);
+    } catch (e) { /* ignore */ }
+  }
+
+  function roomApi(path, body) {
+    return request(BACKEND + path, body, { "X-Room-Token": online.token || "" });
+  }
+
+  const inRoom = () => settings.mode === "online" && !!online.code;
+
+  function showOnlineError(msg) {
+    onlineError.textContent = msg || "";
+    onlineError.hidden = !msg;
+  }
+
+  async function createRoom() {
+    const name = nameInput.value.trim();
+    if (!name) { showOnlineError("Enter your name first."); nameInput.focus(); return; }
+    try { localStorage.setItem("ttp-name", name); } catch (e) { /* ignore */ }
+    try {
+      const r = await roomApi("/api/rooms", { name });
+      enterRoom(r);
+    } catch (e) { showOnlineError(roomErrorText(e)); }
+  }
+
+  async function joinRoom() {
+    const name = nameInput.value.trim();
+    const code = codeInput.value.trim().toUpperCase();
+    if (!name) { showOnlineError("Enter your name first."); nameInput.focus(); return; }
+    if (code.length !== 6) { showOnlineError("Room codes are 6 characters."); codeInput.focus(); return; }
+    try { localStorage.setItem("ttp-name", name); } catch (e) { /* ignore */ }
+    try {
+      const r = await roomApi(`/api/rooms/${code}/join`, { name });
+      enterRoom(r);
+    } catch (e) { showOnlineError(roomErrorText(e)); }
+  }
+
+  function roomErrorText(e) {
+    if (e.status === 404 && /Unknown endpoint|not found/i.test(e.message)) return e.message;
+    if (!e.status || e.status >= 500) return "Cannot reach the room server. Online rooms need the Python server (see README).";
+    return e.message;
+  }
+
+  function enterRoom(r) {
+    online.code = r.code; online.token = r.token; online.role = r.role; online.name = r.name;
+    online.view = null; online.askedDraw = null; online.shownOver = null;
+    saveRoom();
+    showOnlineError("");
+    state = null;
+    logEl.innerHTML = "";
+    log(`Room <b>${r.code}</b>: you are <b>${r.role}</b>.`);
+    startPolling();
+    render();
+  }
+
+  async function leaveRoom() {
+    stopPolling();
+    const code = online.code, token = online.token;
+    online.code = online.token = online.role = online.name = null;
+    online.view = null;
+    saveRoom();
+    state = null;
+    hideOverlay();
+    render();
+    if (code) { try { await request(BACKEND + `/api/rooms/${code}/leave`, {}, { "X-Room-Token": token }); } catch (e) { /* room may be gone */ } }
+  }
+
+  function startPolling() {
+    stopPolling();
+    poll();
+    online.timer = setInterval(poll, 1100);
+  }
+
+  function stopPolling() {
+    if (online.timer) clearInterval(online.timer);
+    online.timer = null;
+  }
+
+  let polling = false;
+  async function poll() {
+    if (!online.code || polling) return;
+    polling = true;
+    try {
+      const view = await roomApi(`/api/rooms/${online.code}`);
+      applyView(view);
+    } catch (e) {
+      if (e.status === 404 || e.status === 403 || e.status === 410) {
+        showOnlineError("This room no longer exists.");
+        stopPolling();
+        online.code = online.token = null; saveRoom();
+        state = null; render();
+      }
+    } finally {
+      polling = false;
+    }
+  }
+
+  function applyView(view) {
+    online.view = view;
+    showOnlineError("");
+    if (view.status === "playing" || view.status === "closed") {
+      state = view;
+      score = view.score;
+    } else {
+      state = null;
+      score = view.score;
+    }
+    render();
+
+    // the other side offered a draw
+    if (view.status === "playing" && view.pending_draw && view.pending_draw !== online.role && online.askedDraw !== view.version) {
+      online.askedDraw = view.version;
+      $("#drawText").textContent = `${view.players[view.pending_draw]} offers a draw. Do you accept?`;
+      if (!drawDialog.open) {
+        openDialog(drawDialog, async (value) => {
+          try { applyView(await roomApi(`/api/rooms/${online.code}/draw`, { action: value === "accept" ? "accept" : "decline" })); }
+          catch (e) { showOnlineError(roomErrorText(e)); }
+        });
+      }
+    } else if (!view.pending_draw && drawDialog.open && settings.mode === "online") {
+      drawDialog.close("decline");
+    }
+
+    // game over: show the result once per round
+    if (view.status === "playing" && view.game_over && online.shownOver !== view.round) {
+      online.shownOver = view.round;
+      setTimeout(() => { if (online.view && online.view.game_over) showOverlay(online.view); }, 650);
+    }
+    if (view.status === "closed" && online.shownOver !== "closed") {
+      online.shownOver = "closed";
+      hideOverlay();
+    }
+  }
+
+  $("#createRoom").addEventListener("click", createRoom);
+  $("#joinRoom").addEventListener("click", joinRoom);
+  codeInput.addEventListener("keydown", (e) => { if (e.key === "Enter") joinRoom(); });
+  nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") (codeInput.value ? joinRoom() : createRoom()); });
+  $("#leaveRoom").addEventListener("click", leaveRoom);
+  $("#acceptGuest").addEventListener("click", async () => {
+    try { applyView(await roomApi(`/api/rooms/${online.code}/respond`, { accept: true })); } catch (e) { showOnlineError(roomErrorText(e)); }
+  });
+  $("#declineGuest").addEventListener("click", async () => {
+    try { applyView(await roomApi(`/api/rooms/${online.code}/respond`, { accept: false })); } catch (e) { showOnlineError(roomErrorText(e)); }
+  });
+  $("#copyLink").addEventListener("click", async () => {
+    const url = `${location.origin}${location.pathname}?room=${online.code}`;
+    try { await navigator.clipboard.writeText(url); } catch (e) { prompt("Copy this link", url); }
+    $("#copied").hidden = false;
+    setTimeout(() => { $("#copied").hidden = true; }, 1500);
+  });
 
   // ---------------------------------------------------------------- setup controls
   const modeBtns = Array.from(document.querySelectorAll("[data-mode]"));
@@ -55,6 +242,7 @@
   const simsSelect = $("#sims");
 
   function syncSetup() {
+    const isOnline = settings.mode === "online";
     modeBtns.forEach((b) => b.classList.toggle("active", b.dataset.mode === settings.mode));
     diffBtns.forEach((b) => b.classList.toggle("active", b.dataset.difficulty === settings.difficulty));
     $("#difficultyField").hidden = settings.mode !== "pvc";
@@ -63,15 +251,55 @@
     depthInput.value = settings.depth;
     simsSelect.value = String(settings.simulations);
 
-    const locked = !!(state && state.in_progress);
-    modeBtns.concat(diffBtns).forEach((b) => { b.disabled = locked; });
+    onlinePanel.hidden = !isOnline;
+    newGameBtn.hidden = isOnline;
+    if (isOnline) {
+      lobby.hidden = !!online.code;
+      roomBox.hidden = !online.code;
+      if (online.code) renderRoomBox();
+    }
+
+    const locked = isOnline ? !!online.code : !!(state && state.in_progress);
+    modeBtns.forEach((b) => { b.disabled = locked; });
+    diffBtns.forEach((b) => { b.disabled = locked; });
     depthInput.disabled = locked;
     simsSelect.disabled = locked;
-    lockNote.hidden = !locked;
+    lockNote.hidden = !(locked && !isOnline);
     newGameBtn.textContent = !state ? "Start game" : locked ? "Restart" : "Play again";
   }
 
-  modeBtns.forEach((btn) => btn.addEventListener("click", () => { settings.mode = btn.dataset.mode; syncSetup(); }));
+  function renderRoomBox() {
+    const v = online.view;
+    $("#roomCode").textContent = online.code;
+    const waitingDot = '<span class="pill-wait"></span>';
+    if (!v) { roomStatus.textContent = "Connecting…"; hostActions.hidden = true; return; }
+    hostActions.hidden = true;
+    if (v.status === "waiting") {
+      roomStatus.innerHTML = online.role === "X"
+        ? `${waitingDot}Share the code <b>${online.code}</b> or the invite link. Waiting for a second player…`
+        : `${waitingDot}Waiting…`;
+    } else if (v.status === "pending") {
+      if (online.role === "X") {
+        roomStatus.textContent = "";
+        $("#applicant").textContent = v.players.O || "Someone";
+        hostActions.hidden = false;
+      } else {
+        roomStatus.innerHTML = `${waitingDot}Waiting for <b>${v.players.X}</b> to accept you…`;
+      }
+    } else if (v.status === "playing") {
+      roomStatus.innerHTML = `Playing <b>${v.players.X}</b> (X) vs <b>${v.players.O}</b> (O) · round ${v.round}. You are <b>${online.role}</b>.`;
+    } else {
+      roomStatus.innerHTML = `${v.message} Leave the room to start another.`;
+    }
+  }
+
+  modeBtns.forEach((btn) => btn.addEventListener("click", () => {
+    if (btn.disabled) return;
+    settings.mode = btn.dataset.mode;
+    if (settings.mode !== "online") { stopPolling(); state = null; }
+    else if (online.code) { startPolling(); }
+    render();
+  }));
   diffBtns.forEach((btn) => btn.addEventListener("click", () => { settings.difficulty = btn.dataset.difficulty; syncSetup(); }));
   depthInput.addEventListener("change", () => {
     settings.depth = Math.max(1, Math.min(5, Number(depthInput.value) || 3));
@@ -89,6 +317,13 @@
 
   async function startGame() {
     if (busy) return;
+    if (settings.mode === "online") {
+      if (online.view && online.view.game_over) {
+        try { applyView(await roomApi(`/api/rooms/${online.code}/rematch`, {})); hideOverlay(); }
+        catch (e) { showOnlineError(roomErrorText(e)); }
+      }
+      return;
+    }
     busy = true;
     hideOverlay();
     try {
@@ -125,19 +360,31 @@
     }
   }
 
+  function myTurn() {
+    if (!state || state.game_over) return false;
+    if (state.mode === "online") return state.status === "playing" && state.current === online.role;
+    return !state.cpu_to_move;
+  }
+
   async function onCell(row, col) {
-    if (busy || !state || state.game_over || state.cpu_to_move) return;
+    if (busy || !state || !myTurn()) return;
     if (!state.legal_moves.some(([r, c]) => r === row && c === col)) return;
     busy = true;
     try {
-      state = await api("/api/move", { row, col });
-      score = state.score;
-      logMove(state.last_move);
-      render();
-      if (state.game_over) { finishGame(); }
-      else if (state.cpu_to_move) { await cpuTurn(); }
+      if (state.mode === "online") {
+        const view = await roomApi(`/api/rooms/${online.code}/move`, { row, col });
+        logMove(view.last_move);
+        applyView(view);
+      } else {
+        state = await api("/api/move", { row, col });
+        score = state.score;
+        logMove(state.last_move);
+        render();
+        if (state.game_over) { finishGame(); }
+        else if (state.cpu_to_move) { await cpuTurn(); }
+      }
     } catch (e) {
-      if (e.status === 404) { state = null; render(); }
+      if (e.status === 404 && state.mode !== "online") { state = null; render(); }
       flash(e.message);
     } finally {
       busy = false;
@@ -162,7 +409,14 @@
 
   // ---------------------------------------------------------------- draw offers
   drawBtn.addEventListener("click", async () => {
-    if (busy || !state || state.game_over || state.cpu_to_move) return;
+    if (busy || !state || state.game_over) return;
+    if (state.mode === "online") {
+      if (state.pending_draw) return;
+      try { applyView(await roomApi(`/api/rooms/${online.code}/draw`, { action: "offer" })); log("You offered a draw."); }
+      catch (e) { showOnlineError(roomErrorText(e)); }
+      return;
+    }
+    if (state.cpu_to_move) return;
     if (state.mode === "pvc") {
       state = await api("/api/draw", { accept: false });
       log(`You offer a draw. <b>CPU declines.</b>`);
@@ -201,15 +455,18 @@
     if (s.draw) {
       title = "It’s a draw";
       sub = "Both players agreed to stop.";
+    } else if (s.mode === "online") {
+      title = s.winner === online.role ? "You win!" : `${s.players[s.winner]} wins!`;
+      sub = `${lineName(s.winning_line)} after ${s.ply} ${s.ply === 1 ? "move" : "moves"}.`;
     } else {
-      const who = s.mode === "pvc" ? (s.winner === "X" ? "You win!" : "CPU wins!") : `Player ${s.winner} wins!`;
-      title = who;
+      title = s.mode === "pvc" ? (s.winner === "X" ? "You win!" : "CPU wins!") : `Player ${s.winner} wins!`;
       sub = `${lineName(s.winning_line)} after ${s.ply} ${s.ply === 1 ? "move" : "moves"}.`;
     }
     $("#overlayTitle").textContent = title;
     $("#overlaySub").textContent = sub;
+    $("#playAgain").textContent = s.mode === "online" ? "Rematch" : "Play again";
     overlay.hidden = false;
-    void overlay.offsetWidth;            // restart animations
+    void overlay.offsetWidth;
     overlay.classList.add("show");
     if (!s.draw) confetti();
   }
@@ -272,12 +529,17 @@
     renderScore();
 
     const idle = !state;
+    const isOnline = !idle && state.mode === "online";
     boardEl.classList.toggle("idle", idle);
     boardEl.classList.toggle("locked", !idle && state.game_over);
 
     const last = idle ? null : state.last_move;
     const best = idle ? null : bestScore();
     const winCells = (!idle && state.winning_line) ? state.winning_line.map(([r, c]) => `${r},${c}`) : [];
+    const animKey = idle ? null : `${state.round || 0}:${state.ply}`;
+    const doAnimate = animate && !idle && animKey !== lastAnimKey && last;
+    if (!idle) lastAnimKey = animKey;
+    const turn = myTurn();
 
     cells.forEach((cell) => {
       const r = Number(cell.dataset.row), c = Number(cell.dataset.col);
@@ -293,16 +555,16 @@
 
       cell.textContent = sym;
       if (sym) cell.classList.add(sym.toLowerCase());
-      if (legal && !state.game_over && !state.cpu_to_move) cell.classList.add("legal");
+      if (legal && turn) cell.classList.add("legal");
       if (isCurrentOldest && !state.game_over) {
         cell.classList.add("expiring");
         cell.title = "Oldest symbol: it expires on this player’s next move";
       }
       if (winCells.includes(`${r},${c}`)) cell.classList.add("win");
-      if (animate && last && last.cell[0] === r && last.cell[1] === c && !state.winning_line) cell.classList.add("placed");
-      cell.disabled = state.game_over || state.cpu_to_move || !legal;
+      if (doAnimate && last.cell[0] === r && last.cell[1] === c && !state.winning_line) cell.classList.add("placed");
+      cell.disabled = !turn || !legal;
 
-      if (animate && last && last.expired && last.expired[0] === r && last.expired[1] === c && !sym) {
+      if (doAnimate && last.expired && last.expired[0] === r && last.expired[1] === c && !sym) {
         const ghost = document.createElement("span");
         ghost.className = `ghost ${last.player.toLowerCase()}`;
         ghost.textContent = last.player;
@@ -327,26 +589,56 @@
     px.classList.toggle("winner", !idle && state.winner === "X");
     po.classList.toggle("winner", !idle && state.winner === "O");
     const pvc = !idle && state.mode === "pvc";
-    $("#nameX").textContent = pvc ? "You" : "Player X";
-    $("#nameO").textContent = pvc ? `CPU · ${cpuLabel(state)}` : "Player O";
+    if (settings.mode === "online" && online.code) {
+      const v = online.view;
+      const nx = v && v.players.X ? v.players.X : "Host";
+      const no = v && v.players.O ? v.players.O : "waiting…";
+      $("#nameX").textContent = online.role === "X" ? `${nx} (you)` : nx;
+      $("#nameO").textContent = online.role === "O" ? `${no} (you)` : no;
+    } else {
+      $("#nameX").textContent = pvc ? "You" : "Player X";
+      $("#nameO").textContent = pvc ? `CPU · ${cpuLabel(state)}` : "Player O";
+    }
 
     // status
     statusEl.className = "status";
     if (idle) {
-      statusEl.textContent = "Pick a mode and press Start.";
+      if (settings.mode === "online") {
+        const v = online.view;
+        if (!online.code) statusEl.textContent = "Create a room or join one with a code.";
+        else if (v && v.status === "pending" && online.role === "X") statusEl.textContent = `${v.players.O} wants to join. Accept above to start.`;
+        else statusEl.textContent = "Waiting for the second player…";
+      } else {
+        statusEl.textContent = "Pick a mode and press Start.";
+      }
+    } else if (isOnline && state.status === "closed") {
+      statusEl.textContent = state.message;
     } else if (state.game_over) {
       statusEl.classList.add("win");
-      statusEl.textContent = state.draw ? "Draw agreed. Game over." : state.message;
-    } else if (state.cpu_to_move) {
+      if (state.draw) statusEl.textContent = "Draw agreed. Game over.";
+      else if (isOnline) statusEl.textContent = state.winner === online.role ? "You win!" : `${state.players[state.winner]} wins!`;
+      else statusEl.textContent = state.message;
+    } else if (!isOnline && state.cpu_to_move) {
       statusEl.classList.add("thinking");
       statusEl.innerHTML = `CPU is thinking<span class="dots"><i></i><i></i><i></i></span>`;
+    } else if (isOnline) {
+      const exp = state.expiring[state.current];
+      if (state.pending_draw === online.role) {
+        statusEl.classList.add("thinking");
+        statusEl.textContent = "Draw offered. Waiting for an answer…";
+      } else if (turn) {
+        statusEl.textContent = exp ? `Your move. Your oldest symbol at (${exp[0]}, ${exp[1]}) expires next.` : "Your move.";
+      } else {
+        statusEl.classList.add("thinking");
+        statusEl.innerHTML = `Waiting for ${state.players[state.current]}<span class="dots"><i></i><i></i><i></i></span>`;
+      }
     } else {
       const who = pvc ? "Your move" : `Player ${state.current}’s move`;
       const exp = state.expiring[state.current];
       statusEl.textContent = exp ? `${who}. Your oldest symbol at (${exp[0]}, ${exp[1]}) expires next.` : `${who}.`;
     }
 
-    drawBtn.disabled = idle || state.game_over || state.cpu_to_move;
+    drawBtn.disabled = idle || state.game_over || (isOnline ? (state.status !== "playing" || !!state.pending_draw) : state.cpu_to_move);
     scoresToggleWrap.hidden = !(pvc && (state.difficulty === "minimax" || state.difficulty === "mcts"));
     $("#scoresLabel").textContent = pvc && state.difficulty === "mcts" ? "MCTS win rates" : "Minimax scores";
 
@@ -392,12 +684,27 @@
   // ---------------------------------------------------------------- log
   function logMove(m, ms) {
     if (!m) return;
-    const who = m.by === "cpu" ? "CPU" : (state && state.mode === "pvc" ? "You" : `Player ${m.player}`);
+    let who;
+    if (m.by === "cpu") who = "CPU";
+    else if (state && state.mode === "online") who = m.player === online.role ? "You" : (state.players[m.player] || `Player ${m.player}`);
+    else who = state && state.mode === "pvc" ? "You" : `Player ${m.player}`;
     let text = `<b>${who}</b> ${m.player === "X" ? "✕" : "○"} (${m.cell[0]}, ${m.cell[1]})`;
     if (m.expired) text += ` · <b>(${m.expired[0]}, ${m.expired[1]}) expired</b>`;
     if (ms !== undefined && ms !== null) text += ` · ${ms} ms`;
     log(text);
   }
+
+  // in online mode the opponent's moves arrive by polling; log them too
+  let loggedPly = 0;
+  const origApplyView = applyView;
+  applyView = function (view) {
+    if (view.status === "playing" && view.ply !== loggedPly) {
+      if (view.last_move && view.last_move.player !== online.role && view.ply > loggedPly) logMove(view.last_move);
+      loggedPly = view.ply;
+    }
+    if (view.ply === 0) loggedPly = 0;
+    origApplyView(view);
+  };
 
   function log(html) {
     const placeholder = logEl.querySelector(".muted");
@@ -422,19 +729,41 @@
       backend = "local";
     }
     if (backend === "local" && !window.TicTacPro) {
-      backend = "remote";                 // engine.js missing: keep trying the server
+      backend = "remote";
       return;
     }
     const note = $("#backendNote");
     if (note) {
       note.textContent = backend === "remote"
         ? "Engine: Python server (src/server.py)"
-        : "Engine: running in your browser (web/engine.js, a port of the Python engine)";
+        : "Engine: running in your browser (web/engine.js, a port of the Python engine)"
+          + (BACKEND ? ` · online rooms via ${BACKEND}` : " · online rooms need the Python server");
     }
   }
 
   (async function boot() {
     await detectBackend();
+
+    // ?room=CODE in the address: open the lobby with the code filled in
+    const params = new URLSearchParams(location.search);
+    const roomParam = (params.get("room") || "").toUpperCase();
+
+    if (online.code) {
+      settings.mode = "online";
+      startPolling();
+      render();
+      animate = true;
+      return;
+    }
+    if (roomParam) {
+      settings.mode = "online";
+      codeInput.value = roomParam;
+      render();
+      animate = true;
+      nameInput.focus();
+      return;
+    }
+
     try {
       const data = await api("/api/state");
       score = data.score;

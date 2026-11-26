@@ -44,6 +44,7 @@
           <div class="seg" role="radiogroup" aria-label="Game mode">
             <button type="button" data-mode="pvp" class="active">Two players</button>
             <button type="button" data-mode="pvc">Versus CPU</button>
+            <button type="button" data-mode="online">Online room</button>
           </div>
         </div>
         <div class="field" id="difficultyField" hidden>
@@ -67,6 +68,33 @@
           </label>
         </div>
         <button type="button" class="primary" id="newGame">Start game</button>
+      </div>
+      <div class="online" id="onlinePanel" hidden>
+        <div class="lobby" id="lobby">
+          <label class="name-field">Your name
+            <input id="playerName" maxlength="20" autocomplete="nickname" placeholder="e.g. Abhijit">
+          </label>
+          <button type="button" class="primary" id="createRoom">Create room</button>
+          <span class="or">or join with a code</span>
+          <input id="joinCode" class="code-input" maxlength="6" autocapitalize="characters" spellcheck="false" placeholder="ROOM CODE">
+          <button type="button" id="joinRoom">Join</button>
+        </div>
+        <div class="room" id="roomBox" hidden>
+          <div class="room-head">
+            <span class="label">Room</span>
+            <b class="room-code" id="roomCode">------</b>
+            <button type="button" class="mini" id="copyLink">Copy invite link</button>
+            <span class="copied" id="copied" hidden>Copied</span>
+            <button type="button" class="mini danger" id="leaveRoom">Leave room</button>
+          </div>
+          <p class="room-status" id="roomStatus">Waiting for a second player.</p>
+          <div class="host-actions" id="hostActions" hidden>
+            <span id="applicant">Someone</span> wants to join.
+            <button type="button" class="primary" id="acceptGuest">Accept</button>
+            <button type="button" id="declineGuest">Decline</button>
+          </div>
+        </div>
+        <p class="online-error" id="onlineError" hidden></p>
       </div>
       <p class="lock-note" id="lockNote" hidden>
         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M17 9V7a5 5 0 0 0-10 0v2H5v12h14V9h-2Zm-8 0V7a3 3 0 0 1 6 0v2H9Z"/></svg>
@@ -151,6 +179,7 @@
       </form>
     </dialog>
   </main>
+  <script src="config.js"></script>
   <script src="engine.js"></script>
   <script src="app.js"></script>
 </body>

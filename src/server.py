@@ -21,14 +21,17 @@ API (all JSON, all need ``X-Session-Id``):
                                         PvC: the CPU always declines
 """
 import json
+import os
 import re
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from src.ai import MCTS_AI, MinimaxAI, RandomAI, RuleBasedAI
 from src.game import Game
+from src.rooms import RoomError, RoomService, make_store
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -246,6 +249,17 @@ class SessionStore:
 
 
 STORE = SessionStore()
+ROOMS = None
+_ROOMS_LOCK = threading.Lock()
+
+
+def rooms():
+    """Online-room service, created on first use (Postgres when DATABASE_URL is set)."""
+    global ROOMS
+    with _ROOMS_LOCK:
+        if ROOMS is None:
+            ROOMS = RoomService(make_store())
+        return ROOMS
 SID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 
@@ -259,7 +273,15 @@ class Handler(SimpleHTTPRequestHandler):
 
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
+        # the static build (another origin) calls this API for online rooms
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Session-Id, X-Room-Token")
         super().end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.end_headers()
 
     # -------------------------------------------------------- helpers
     def _json(self, status, payload):
@@ -291,9 +313,48 @@ class Handler(SimpleHTTPRequestHandler):
             raise ValueError("Missing or invalid X-Session-Id header.")
         return sid
 
+    # -------------------------------------------------------- online rooms
+    def _handle_rooms(self, method, path, data):
+        parts = [p for p in path.split("/") if p]          # api, rooms, <code>, <action>
+        try:
+            svc = rooms()
+            if method == "GET":
+                if len(parts) != 3:
+                    raise RoomError("Unknown endpoint.", 404)
+                query = parse_qs(urlparse(self.path).query)
+                token = self.headers.get("X-Room-Token") or (query.get("token") or [""])[0]
+                return self._json(200, svc.view(parts[2], token))
+            if len(parts) == 2:
+                return self._json(200, svc.create(data.get("name")))
+            if len(parts) != 4:
+                raise RoomError("Unknown endpoint.", 404)
+            code, action = parts[2], parts[3]
+            token = self.headers.get("X-Room-Token") or data.get("token") or ""
+            if action == "join":
+                result = svc.join(code, data.get("name"))
+            elif action == "respond":
+                result = svc.respond(code, token, bool(data.get("accept")))
+            elif action == "move":
+                result = svc.move(code, token, data.get("row"), data.get("col"))
+            elif action == "draw":
+                result = svc.draw(code, token, data.get("action"))
+            elif action == "rematch":
+                result = svc.rematch(code, token)
+            elif action == "leave":
+                result = svc.leave(code, token)
+            else:
+                raise RoomError("Unknown endpoint.", 404)
+            return self._json(200, result)
+        except RoomError as exc:
+            return self._json(exc.status, {"error": str(exc)})
+        except Exception as exc:                            # database unreachable, etc.
+            return self._json(503, {"error": f"Room service unavailable ({exc.__class__.__name__})."})
+
     # -------------------------------------------------------- routes
     def do_GET(self):
         path = self.path.split("?")[0]
+        if path.startswith("/api/rooms"):
+            return self._handle_rooms("GET", path, {})
         if path == "/api/state":
             try:
                 session = STORE.get(self._sid())
@@ -304,7 +365,8 @@ class Handler(SimpleHTTPRequestHandler):
             with session.lock:
                 return self._json(200, session.state())
         if path == "/api/health":
-            return self._json(200, {"ok": True, "sessions": len(STORE)})
+            return self._json(200, {"ok": True, "sessions": len(STORE),
+                                    "rooms": rooms().store.__class__.__name__.replace("Store", "").lower()})
         if path.startswith("/api/"):
             return self._json(404, {"error": "Unknown endpoint."})
         return super().do_GET()
@@ -313,6 +375,8 @@ class Handler(SimpleHTTPRequestHandler):
         path = self.path.split("?")[0]
         try:
             data = self._read_json()
+            if path.startswith("/api/rooms"):
+                return self._handle_rooms("POST", path, data)
             sid = self._sid()
             if path == "/api/new":
                 session = STORE.get_or_create(sid)

@@ -18,6 +18,22 @@ os.chdir(ROOT)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+
+def load_dotenv(path=os.path.join(ROOT, ".env")):
+    """Read KEY=VALUE lines into the environment (never overriding real env vars)."""
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+load_dotenv()
+
 from src.server import serve  # noqa: E402
 
 
@@ -32,6 +48,7 @@ def main():
     url = f"http://{shown_host}:{args.port}/"
     if not args.no_browser:
         threading.Timer(0.8, webbrowser.open, args=(url,)).start()
+    print("online rooms:", "Postgres" if os.environ.get("DATABASE_URL") else "in-memory (set DATABASE_URL for Postgres)", flush=True)
     serve(args.host, args.port)
 
 

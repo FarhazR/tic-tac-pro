@@ -7,4 +7,3 @@ tests
 *.md
 run.bat
 pytest.ini
-requirements.txt

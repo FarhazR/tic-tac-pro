@@ -33,8 +33,9 @@ src/
   game.py     rules, turn order, expiration, draw flag, copy(), legal moves, state_key()
   ai.py       RandomAI, RuleBasedAI, MinimaxAI, MCTS_AI  (all expose choose_move(game))
   main.py     terminal interface
-  server.py   local web server: JSON API over the same engine
-web/          browser UI (index.html, style.css, app.js)
+  server.py   web server: JSON API over the same engine + online rooms API
+  rooms.py    online rooms: room logic, Postgres / in-memory stores
+web/          browser UI (index.html, style.css, app.js, engine.js, config.js)
 run.py        starts the web server and opens the browser
 benchmark.py  round-robin benchmark of the AI players
 tests/        pytest suite
@@ -124,6 +125,43 @@ writes nothing to disk.
 docker build -t tic-tac-pro .
 docker run --rm -p 7860:7860 tic-tac-pro
 ```
+
+## Online rooms (two devices over the internet)
+
+Choose **Online room**, enter a name and press *Create room*. You get a
+6-character code and an invite link (`?room=CODE`). The other player opens the
+link or types the code, enters a name and presses *Join*; the host sees the
+request and presses *Accept*. Both browsers then play Player vs Player: the
+host is X, moves are validated server-side, draw offers and rematches go
+through the room, and either side can leave. Rooms expire after a day.
+
+Rooms need the Python server, because browsers cannot share state on their
+own. Room state lives in **Postgres** when `DATABASE_URL` is set (for example
+an Aiven service; put the URL in a git-ignored `.env` file next to `run.py`
+or in the host's environment), otherwise in the server's memory, which is
+enough for one local server. `python run.py` prints which one is active, and
+`/api/health` reports it as `"rooms": "postgres"` or `"memory"`.
+
+When the page is served from a static host (the Hugging Face Space), it needs
+to know where the server is: set `backend` in `web/config.js` to the server's
+origin (for example `https://tic-tac-pro.onrender.com`) and redeploy the
+static files. The server already sends the CORS headers the page needs.
+
+### Hosting the room server for free
+
+Any host that runs a container or `python run.py` works. Render's free web
+service is the simplest:
+
+1. Push this repository to GitHub.
+2. On https://render.com create a **Web Service** from the repo, runtime
+   **Docker** (the `Dockerfile` is at the root), instance type **Free**.
+3. Add an environment variable `DATABASE_URL` with your Postgres URL.
+   Render sets `PORT` itself; `run.py` honours it.
+4. After the first deploy, copy the service URL into `web/config.js` →
+   `backend`, commit, and push the `web/` folder to the Space again.
+
+Free instances sleep after 15 minutes without traffic and take about a minute
+to wake on the first request, so open the room page a minute before a demo.
 
 ## Play in the terminal
 

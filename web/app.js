@@ -12,6 +12,7 @@
   const statusEl = $("#status");
   const logEl = $("#log");
   const drawBtn = $("#offerDraw");
+  const rematchBtn = $("#rematchBtn");
   const newGameBtn = $("#newGame");
   const lockNote = $("#lockNote");
   const scoresToggleWrap = $("#scoresToggleWrap");
@@ -19,6 +20,7 @@
   const drawDialog = $("#drawDialog");
   const restartDialog = $("#restartDialog");
   const overlay = $("#overlay");
+  const toastEl = $("#toast");
 
   const CONFIG = window.TTP_CONFIG || {};
   const BACKEND = (CONFIG.backend || "").replace(/\/$/, "");
@@ -39,6 +41,83 @@
   let busy = false;
   let animate = false;
   let lastAnimKey = null;    // "round:ply" of the last move already animated
+
+  // ---------------------------------------------------------------- sounds (Web Audio, no files)
+  const Sound = (() => {
+    let ctx = null;
+    let muted = false;
+    try { muted = localStorage.getItem("ttp-muted") === "1"; } catch (e) { /* ignore */ }
+
+    function ensure() {
+      if (!ctx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        ctx = new AC();
+      }
+      if (ctx.state === "suspended") ctx.resume();
+      return ctx;
+    }
+    function tone(freq, start, dur, type, gain) {
+      const c = ensure();
+      if (!c) return;
+      const o = c.createOscillator();
+      const g = c.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(freq, c.currentTime + start);
+      g.gain.setValueAtTime(0.0001, c.currentTime + start);
+      g.gain.exponentialRampToValueAtTime(gain, c.currentTime + start + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + start + dur);
+      o.connect(g).connect(c.destination);
+      o.start(c.currentTime + start);
+      o.stop(c.currentTime + start + dur + 0.02);
+    }
+    const PATTERNS = {
+      x:    [[523, 0, 0.09, "square", 0.05], [659, 0.07, 0.12, "square", 0.05]],
+      o:    [[392, 0, 0.11, "triangle", 0.09], [330, 0.08, 0.16, "triangle", 0.09]],
+      win:  [[523, 0, 0.14, "triangle", 0.1], [659, 0.12, 0.14, "triangle", 0.1], [784, 0.24, 0.14, "triangle", 0.1], [1047, 0.36, 0.4, "triangle", 0.12]],
+      lose: [[392, 0, 0.18, "sawtooth", 0.05], [349, 0.16, 0.18, "sawtooth", 0.05], [311, 0.32, 0.18, "sawtooth", 0.05], [262, 0.48, 0.5, "sawtooth", 0.06]],
+      draw: [[440, 0, 0.16, "triangle", 0.08], [440, 0.22, 0.3, "triangle", 0.08]],
+      join: [[880, 0, 0.08, "sine", 0.08], [1175, 0.09, 0.18, "sine", 0.08]],
+      expire: [[220, 0, 0.2, "sine", 0.06]],
+    };
+    return {
+      play(kind) {
+        if (muted || !PATTERNS[kind]) return;
+        try { PATTERNS[kind].forEach((p) => tone(...p)); } catch (e) { /* audio blocked */ }
+      },
+      toggle() {
+        muted = !muted;
+        try { localStorage.setItem("ttp-muted", muted ? "1" : "0"); } catch (e) { /* ignore */ }
+        if (!muted) ensure();
+        return muted;
+      },
+      get muted() { return muted; },
+      unlock() { ensure(); },
+    };
+  })();
+
+  const soundBtn = $("#soundBtn");
+  function renderSoundBtn() {
+    soundBtn.classList.toggle("muted", Sound.muted);
+    soundBtn.setAttribute("aria-pressed", String(!Sound.muted));
+    $("#soundLabel").textContent = Sound.muted ? "Sound off" : "Sound on";
+  }
+  soundBtn.addEventListener("click", () => { Sound.toggle(); renderSoundBtn(); if (!Sound.muted) Sound.play("x"); });
+  document.addEventListener("pointerdown", () => Sound.unlock(), { once: true });
+  renderSoundBtn();
+
+  function playMoveSound(move) {
+    if (!move) return;
+    Sound.play(move.player === "X" ? "x" : "o");
+    if (move.expired) setTimeout(() => Sound.play("expire"), 140);
+  }
+
+  function toast(msg, ms = 2600) {
+    toastEl.textContent = msg;
+    toastEl.hidden = false;
+    clearTimeout(toastEl._t);
+    toastEl._t = setTimeout(() => { toastEl.hidden = true; }, ms);
+  }
 
   // ---------------------------------------------------------------- api
   // "remote": the Python server.  "local": engine.js, used on static hosts.
@@ -87,11 +166,14 @@
     } catch (e) { /* ignore */ }
   }
 
+  // rooms live on the page's own server when one serves the page, else on the configured backend
+  const roomsBase = () => (backend === "remote" ? "" : BACKEND);
+
   function roomApi(path, body) {
-    return request(BACKEND + path, body, { "X-Room-Token": online.token || "" });
+    return request(roomsBase() + path, body, { "X-Room-Token": online.token || "" });
   }
 
-  const inRoom = () => settings.mode === "online" && !!online.code;
+  const opponentName = (v) => (v && v.players[online.role === "X" ? "O" : "X"]) || "Your opponent";
 
   function showOnlineError(msg) {
     onlineError.textContent = msg || "";
@@ -102,10 +184,8 @@
     const name = nameInput.value.trim();
     if (!name) { showOnlineError("Enter your name first."); nameInput.focus(); return; }
     try { localStorage.setItem("ttp-name", name); } catch (e) { /* ignore */ }
-    try {
-      const r = await roomApi("/api/rooms", { name });
-      enterRoom(r);
-    } catch (e) { showOnlineError(roomErrorText(e)); }
+    try { enterRoom(await roomApi("/api/rooms", { name })); }
+    catch (e) { showOnlineError(roomErrorText(e)); }
   }
 
   async function joinRoom() {
@@ -114,15 +194,13 @@
     if (!name) { showOnlineError("Enter your name first."); nameInput.focus(); return; }
     if (code.length !== 6) { showOnlineError("Room codes are 6 characters."); codeInput.focus(); return; }
     try { localStorage.setItem("ttp-name", name); } catch (e) { /* ignore */ }
-    try {
-      const r = await roomApi(`/api/rooms/${code}/join`, { name });
-      enterRoom(r);
-    } catch (e) { showOnlineError(roomErrorText(e)); }
+    try { enterRoom(await roomApi(`/api/rooms/${code}/join`, { name })); }
+    catch (e) { showOnlineError(roomErrorText(e)); }
   }
 
   function roomErrorText(e) {
     if (e.status === 404 && /Unknown endpoint|not found/i.test(e.message)) return e.message;
-    if (!e.status || e.status >= 500) return "Cannot reach the room server. Online rooms need the Python server (see README).";
+    if (!e.status || e.status >= 500) return "Cannot reach the room server right now. It may be waking up; try again in a minute.";
     return e.message;
   }
 
@@ -133,6 +211,7 @@
     showOnlineError("");
     state = null;
     logEl.innerHTML = "";
+    loggedPly = 0;
     log(`Room <b>${r.code}</b>: you are <b>${r.role}</b>.`);
     startPolling();
     render();
@@ -147,7 +226,7 @@
     state = null;
     hideOverlay();
     render();
-    if (code) { try { await request(BACKEND + `/api/rooms/${code}/leave`, {}, { "X-Room-Token": token }); } catch (e) { /* room may be gone */ } }
+    if (code) { try { await request(roomsBase() + `/api/rooms/${code}/leave`, {}, { "X-Room-Token": token }); } catch (e) { /* room may be gone */ } }
   }
 
   function startPolling() {
@@ -166,8 +245,7 @@
     if (!online.code || polling) return;
     polling = true;
     try {
-      const view = await roomApi(`/api/rooms/${online.code}`);
-      applyView(view);
+      applyView(await roomApi(`/api/rooms/${online.code}`));
     } catch (e) {
       if (e.status === 404 || e.status === 403 || e.status === 410) {
         showOnlineError("This room no longer exists.");
@@ -180,26 +258,55 @@
     }
   }
 
+  let loggedPly = 0;
+
   function applyView(view) {
+    const prev = online.view;
+    // nothing changed since the last poll: do not touch the DOM (no flicker)
+    if (prev && prev.version === view.version && prev.status === view.status) return;
+
+    const opp = opponentName(view);
+    if (prev) {
+      // the other side wants in
+      if (prev.status === "waiting" && view.status === "pending" && online.role === "X") {
+        Sound.play("join");
+        log(`<b>${view.players.O}</b> wants to join.`);
+      }
+      if (prev.status === "pending" && view.status === "playing") log(`<b>${view.players.X}</b> vs <b>${view.players.O}</b>: game on.`);
+      // draw offers
+      if (!prev.pending_draw && view.pending_draw && view.pending_draw !== online.role) log(`<b>${opp}</b> offers a draw.`);
+      if (prev.pending_draw === online.role && !view.pending_draw) {
+        if (view.game_over && view.draw) log(`<b>${opp}</b> accepted your draw offer.`);
+        else { log(`<b>${opp}</b> declined your draw offer.`); toast(`${opp} declined the draw.`); }
+      }
+      // opponent's moves (ours are logged where we make them)
+      if (view.status === "playing" && view.ply > loggedPly && view.last_move && view.last_move.player !== online.role) {
+        logMove(view.last_move);
+        playMoveSound(view.last_move);
+      }
+      if (prev.round !== view.round && view.round > 1) log(`Round ${view.round} started.`);
+      if (view.status === "closed" && prev.status !== "closed") toast(view.message);
+    }
+    if (view.status === "playing") loggedPly = view.ply;
+    if (view.ply === 0) loggedPly = 0;
+
     online.view = view;
     showOnlineError("");
-    if (view.status === "playing" || view.status === "closed") {
-      state = view;
-      score = view.score;
-    } else {
-      state = null;
-      score = view.score;
-    }
+    score = view.score;
+    state = (view.status === "playing" || view.status === "closed") ? view : null;
     render();
 
-    // the other side offered a draw
+    // the other side offered a draw: ask
     if (view.status === "playing" && view.pending_draw && view.pending_draw !== online.role && online.askedDraw !== view.version) {
       online.askedDraw = view.version;
       $("#drawText").textContent = `${view.players[view.pending_draw]} offers a draw. Do you accept?`;
       if (!drawDialog.open) {
         openDialog(drawDialog, async (value) => {
-          try { applyView(await roomApi(`/api/rooms/${online.code}/draw`, { action: value === "accept" ? "accept" : "decline" })); }
-          catch (e) { showOnlineError(roomErrorText(e)); }
+          const accept = value === "accept";
+          try {
+            log(`You ${accept ? "accepted" : "declined"} the draw.`);
+            applyView(await roomApi(`/api/rooms/${online.code}/draw`, { action: accept ? "accept" : "decline" }));
+          } catch (e) { showOnlineError(roomErrorText(e)); }
         });
       }
     } else if (!view.pending_draw && drawDialog.open && settings.mode === "online") {
@@ -237,6 +344,7 @@
     $("#copied").hidden = false;
     setTimeout(() => { $("#copied").hidden = true; }, 1500);
   });
+  rematchBtn.addEventListener("click", startGame);
 
   // ---------------------------------------------------------------- setup controls
   const modeBtns = Array.from(document.querySelectorAll("[data-mode]"));
@@ -275,8 +383,8 @@
     const v = online.view;
     $("#roomCode").textContent = online.code;
     const waitingDot = '<span class="pill-wait"></span>';
-    if (!v) { roomStatus.textContent = "Connecting…"; hostActions.hidden = true; return; }
     hostActions.hidden = true;
+    if (!v) { roomStatus.textContent = "Connecting…"; return; }
     if (v.status === "waiting") {
       roomStatus.innerHTML = online.role === "X"
         ? `${waitingDot}Share the code <b>${online.code}</b> or the invite link. Waiting for a second player…`
@@ -322,7 +430,7 @@
     if (busy) return;
     if (settings.mode === "online") {
       if (online.view && online.view.game_over) {
-        try { applyView(await roomApi(`/api/rooms/${online.code}/rematch`, {})); hideOverlay(); }
+        try { hideOverlay(); applyView(await roomApi(`/api/rooms/${online.code}/rematch`, {})); }
         catch (e) { showOnlineError(roomErrorText(e)); }
       }
       return;
@@ -377,11 +485,14 @@
       if (state.mode === "online") {
         const view = await roomApi(`/api/rooms/${online.code}/move`, { row, col });
         logMove(view.last_move);
+        playMoveSound(view.last_move);
+        loggedPly = view.ply;
         applyView(view);
       } else {
         state = await api("/api/move", { row, col });
         score = state.score;
         logMove(state.last_move);
+        playMoveSound(state.last_move);
         render();
         if (state.game_over) { finishGame(); }
         else if (state.cpu_to_move) { await cpuTurn(); }
@@ -395,13 +506,71 @@
     }
   }
 
+  const nextFrame = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  /** Run a search step by step, redrawing the insight panel as it grows.
+   *  Returns the final snapshot. Takes ~1.4 s whatever the budget. */
+  async function liveSearch(ai, game, kind) {
+    const search = ai.startSearch(game);
+    const frames = 36;
+    const batch = Math.max(1, Math.ceil(search.total / frames));
+    let finished = false;
+    let computeMs = 0;
+    while (!finished) {
+      const t0 = performance.now();
+      finished = search.step(batch);
+      computeMs += performance.now() - t0;
+      const snap = search.snapshot();
+      snap.live = true; snap.replica = kind === "replica";
+      renderInsight(snap);
+      await nextFrame(32);
+    }
+    const snap = search.snapshot();
+    snap.compute_ms = Math.round(computeMs * 10) / 10;
+    return snap;
+  }
+
   async function cpuTurn() {
     statusEl.className = "status thinking";
     statusEl.innerHTML = `CPU is thinking<span class="dots"><i></i><i></i><i></i></span>`;
-    await new Promise((r) => setTimeout(r, 420));
-    state = await api("/api/cpu", {});
+    const T = window.TicTacPro;
+    const searchable = T && (state.difficulty === "mcts" || state.difficulty === "minimax");
+
+    if (searchable && backend === "local") {
+      // the live search IS the CPU's decision
+      const session = T.localSession();
+      const snap = await liveSearch(session.ai, session.game, "real");
+      const time_ms = snap.compute_ms;
+      const ai = session.ai;
+      let move, scores;
+      if (snap.type === "mcts") {
+        const most = Math.max(...snap.root.map((c) => c.visits));
+        const bests = snap.root.filter((c) => c.visits === most);
+        move = bests[Math.floor(Math.random() * bests.length)].move;
+        scores = Object.fromEntries(snap.root.map((c) => [`${c.move[0]},${c.move[1]}`, c.win_rate]));
+      } else {
+        const best = Math.max(...snap.root.map((c) => c.score));
+        const bests = snap.root.filter((c) => c.score === best);
+        move = bests[Math.floor(Math.random() * bests.length)].move;
+        scores = Object.fromEntries(snap.root.map((c) => [`${c.move[0]},${c.move[1]}`, c.score]));
+      }
+      snap.chosen = move;
+      ai.lastTree = snap;
+      state = await api("/api/cpu", { move, scores, insight: snap, time_ms });
+    } else if (searchable && backend === "remote") {
+      // the server decides; the page animates a replica of the same search for the visual
+      const ai = state.difficulty === "mcts" ? new T.MCTS_AI(state.simulations) : new T.MinimaxAI(state.depth);
+      const pending = api("/api/cpu", {});
+      await liveSearch(ai, T.gameFromState(state), "replica");
+      state = await pending;
+      if (state.ai_insight) state.ai_insight.replica_shown = true;
+    } else {
+      await nextFrame(420);
+      state = await api("/api/cpu", {});
+    }
     score = state.score;
     logMove(state.last_move, state.ai_time_ms);
+    playMoveSound(state.last_move);
     render();
     if (state.game_over) finishGame();
   }
@@ -451,6 +620,13 @@
   // ---------------------------------------------------------------- overlay
   const COLORS = ["#1a5fd0", "#7fb0ff", "#f2994a", "#ffd166", "#ffffff", "#2ec4b6"];
 
+  function outcomeFor(s) {
+    if (s.draw) return "draw";
+    if (s.mode === "online") return s.winner === online.role ? "win" : "lose";
+    if (s.mode === "pvc") return s.winner === "X" ? "win" : "lose";
+    return "win";
+  }
+
   function showOverlay(s) {
     overlay.className = "overlay " + (s.draw ? "draw" : s.winner.toLowerCase());
     $("#bigSym").textContent = s.draw ? "=" : s.winner;
@@ -471,7 +647,9 @@
     overlay.hidden = false;
     void overlay.offsetWidth;
     overlay.classList.add("show");
-    if (!s.draw) confetti();
+    const outcome = outcomeFor(s);
+    Sound.play(outcome);
+    if (outcome === "win") confetti();
   }
 
   function hideOverlay() {
@@ -508,6 +686,117 @@
     if (rows.size === 1) return ["Top row", "Middle row", "Bottom row"][line[0][0]];
     if (cols.size === 1) return ["Left column", "Middle column", "Right column"][line[0][1]];
     return line.some((c) => c[0] === 0 && c[1] === 0) ? "Diagonal" : "Anti-diagonal";
+  }
+
+  // ---------------------------------------------------------------- AI insight
+  const insightEl = $("#insight");
+  const SVG_NS = "http://www.w3.org/2000/svg";
+
+  function svgEl(name, attrs, text) {
+    const el = document.createElementNS(SVG_NS, name);
+    for (const k in attrs) el.setAttribute(k, attrs[k]);
+    if (text !== undefined) el.textContent = text;
+    return el;
+  }
+
+  function renderInsight(liveSnap) {
+    const ins = liveSnap || (state && state.ai_insight);
+    if (!ins || !state || state.mode !== "pvc") { insightEl.hidden = true; return; }
+    insightEl.hidden = false;
+    const isMcts = ins.type === "mcts";
+    insightEl.classList.toggle("live", !!ins.live);
+    if (ins.live) {
+      $("#insightMeta").textContent = isMcts
+        ? `simulation ${ins.done} / ${ins.total}`
+        : `move ${ins.done} / ${ins.total} · ${ins.nodes} nodes`;
+    } else {
+      $("#insightMeta").textContent = `${ins.nodes} nodes · ${ins.time_ms} ms`;
+    }
+    const replicaNote = ins.replica || ins.replica_shown ? " Shown live from a browser replica of the search; the server made the actual decision." : "";
+    $("#insightSub").textContent = (isMcts
+      ? `MCTS, ${ins.simulations} simulations. Bars: share of simulations spent on each move; the CPU plays the most-visited one.`
+      : `Minimax, depth ${ins.depth}, alpha-beta. Bars: root score of each move; the CPU plays the highest.`) + replicaNote;
+
+    const bars = $("#insightBars");
+    bars.innerHTML = "";
+    const root = ins.root || [];
+    let widths;
+    if (isMcts) {
+      const total = root.reduce((a, n) => a + n.visits, 0) || 1;
+      widths = root.map((n) => n.visits / total);
+    } else {
+      const vals = root.filter((n) => n.score !== null && n.score !== undefined).map((n) => n.score);
+      const lo = vals.length ? Math.min(...vals) : 0, hi = vals.length ? Math.max(...vals) : 0;
+      widths = root.map((n) => (n.score === null || n.score === undefined) ? 0 : (hi === lo ? 0.6 : 0.08 + 0.92 * (n.score - lo) / (hi - lo)));
+    }
+    root.forEach((n, i) => {
+      const pending = !isMcts && (n.score === null || n.score === undefined);
+      const row = document.createElement("div");
+      row.className = "ibar" + (n.best ? " best" : "") + (!isMcts && !pending && n.score < 0 ? " neg" : "") + (pending ? " pending" : "");
+      const id = document.createElement("span"); id.className = "cell-id"; id.textContent = `(${n.move[0]},${n.move[1]})`;
+      const track = document.createElement("div"); track.className = "track";
+      const fill = document.createElement("div"); fill.className = "fill"; fill.style.width = `${Math.max(2, widths[i] * 100)}%`;
+      track.appendChild(fill);
+      const val = document.createElement("span"); val.className = "val";
+      val.textContent = isMcts ? `${Math.round(n.win_rate * 100)}% · ${n.visits} sims` : pending ? "…" : (n.score > 0 ? `+${n.score}` : `${n.score}`);
+      row.append(id, track, val);
+      bars.appendChild(row);
+    });
+
+    $("#insightTreeWrap").hidden = !isMcts;
+    if (isMcts) {
+      if (ins.live) $("#insightTreeWrap").open = true;
+      renderTree(ins);
+    }
+  }
+
+  function renderTree(ins) {
+    const svg = $("#insightTree");
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const root = ins.root;
+    const W = 640, H = 300;
+    const n = root.length || 1;
+    const colW = W / n;
+    const rootX = W / 2, rootY = 28, childY = 128, grandY = 236;
+    const maxV = Math.max(...root.map((c) => c.visits), 1);
+    const radius = (v, base, span) => base + span * Math.sqrt(v / maxV);
+
+    const label = (x, y, text, cls, size) => {
+      const t = svgEl("text", { x, y, "text-anchor": "middle", "font-size": size || 10, "font-weight": 800,
+        "font-family": "Nunito, Segoe UI, sans-serif", fill: cls === "light" ? "#ffffff" : "#1f2937" }, text);
+      svg.appendChild(t);
+    };
+
+    // links first (behind nodes)
+    root.forEach((c, i) => {
+      const cx = colW * (i + 0.5);
+      svg.appendChild(svgEl("line", { x1: rootX, y1: rootY, x2: cx, y2: childY, stroke: c.best ? "#1a5fd0" : "#cfd6e3", "stroke-width": c.best ? 2.5 : 1.5 }));
+      (c.children || []).forEach((g, j) => {
+        const k = (c.children.length - 1) / 2;
+        const gx = cx + (j - k) * Math.min(colW / 3.2, 22);
+        svg.appendChild(svgEl("line", { x1: cx, y1: childY, x2: gx, y2: grandY, stroke: "#dfe5ef", "stroke-width": 1 }));
+      });
+    });
+
+    // root
+    svg.appendChild(svgEl("circle", { cx: rootX, cy: rootY, r: 14, fill: "#0f1d33" }));
+    label(rootX, rootY + 4, "root", "light", 9);
+
+    // children + grandchildren
+    root.forEach((c, i) => {
+      const cx = colW * (i + 0.5);
+      const r = radius(c.visits, 7, 16);
+      svg.appendChild(svgEl("circle", { cx, cy: childY, r, fill: c.best ? "#1a5fd0" : "#e6ebf5", stroke: c.best ? "#124aa6" : "#c3cad8", "stroke-width": 1.5 }));
+      label(cx, childY + r + 12, `(${c.move[0]},${c.move[1]})`, "", 10);
+      label(cx, childY + r + 24, `${Math.round(c.win_rate * 100)}% · ${c.visits}`, "", 9);
+      (c.children || []).forEach((g, j) => {
+        const k = (c.children.length - 1) / 2;
+        const gx = cx + (j - k) * Math.min(colW / 3.2, 22);
+        const gr = Math.max(3, radius(g.visits, 2, 9));
+        svg.appendChild(svgEl("circle", { cx: gx, cy: grandY, r: gr, fill: "#f2994a", opacity: 0.85 }));
+      });
+      if (c.children && c.children.length) label(cx, grandY + 24, c.children.map((g) => `(${g.move[0]},${g.move[1]})`).join(" "), "", 8);
+    });
   }
 
   // ---------------------------------------------------------------- render
@@ -642,11 +931,13 @@
     }
 
     drawBtn.disabled = idle || state.game_over || (isOnline ? (state.status !== "playing" || !!state.pending_draw) : state.cpu_to_move);
+    rematchBtn.hidden = !(isOnline && state.status === "playing" && state.game_over);
     scoresToggleWrap.hidden = !(pvc && (state.difficulty === "minimax" || state.difficulty === "mcts"));
     $("#scoresLabel").textContent = pvc && state.difficulty === "mcts" ? "MCTS win rates" : "Minimax scores";
 
     renderQueue("#queueX", idle ? [] : state.queues.X);
     renderQueue("#queueO", idle ? [] : state.queues.O);
+    if (!(state && state.cpu_to_move)) renderInsight();   // a live search is drawing it meanwhile
   }
 
   function renderScore() {
@@ -689,25 +980,13 @@
     if (!m) return;
     let who;
     if (m.by === "cpu") who = "CPU";
-    else if (state && state.mode === "online") who = m.player === online.role ? "You" : (state.players[m.player] || `Player ${m.player}`);
+    else if (settings.mode === "online" && online.code) who = m.player === online.role ? "You" : ((online.view && online.view.players[m.player]) || `Player ${m.player}`);
     else who = state && state.mode === "pvc" ? "You" : `Player ${m.player}`;
     let text = `<b>${who}</b> ${m.player === "X" ? "✕" : "○"} (${m.cell[0]}, ${m.cell[1]})`;
     if (m.expired) text += ` · <b>(${m.expired[0]}, ${m.expired[1]}) expired</b>`;
     if (ms !== undefined && ms !== null) text += ` · ${ms} ms`;
     log(text);
   }
-
-  // in online mode the opponent's moves arrive by polling; log them too
-  let loggedPly = 0;
-  const origApplyView = applyView;
-  applyView = function (view) {
-    if (view.status === "playing" && view.ply !== loggedPly) {
-      if (view.last_move && view.last_move.player !== online.role && view.ply > loggedPly) logMove(view.last_move);
-      loggedPly = view.ply;
-    }
-    if (view.ply === 0) loggedPly = 0;
-    origApplyView(view);
-  };
 
   function log(html) {
     const placeholder = logEl.querySelector(".muted");
@@ -722,7 +1001,13 @@
     statusEl.textContent = msg;
   }
 
-  // ---------------------------------------------------------------- boot
+  // ---------------------------------------------------------------- status pills
+  function setPill(id, cls, text) {
+    const pill = $(id);
+    pill.className = "pill " + cls;
+    pill.querySelector("span").textContent = text;
+  }
+
   async function detectBackend() {
     try {
       const res = await fetch("/api/health", { headers: { "X-Session-Id": sid } });
@@ -731,23 +1016,27 @@
     } catch (e) {
       backend = "local";
     }
-    if (backend === "local" && !window.TicTacPro) {
-      backend = "remote";
-      return;
-    }
-    const note = $("#backendNote");
-    if (note) {
-      note.textContent = backend === "remote"
-        ? "Engine: Python server (src/server.py)"
-        : "Engine: running in your browser (web/engine.js, a port of the Python engine)"
-          + (BACKEND ? ` · online rooms via ${BACKEND}` : " · online rooms need the Python server");
+    if (backend === "local" && !window.TicTacPro) backend = "remote";
+    setPill("#enginePill", "ok", backend === "remote" ? "Engine: server" : "Engine: in your browser");
+
+    // online rooms: same origin when the server serves the page, else the configured backend
+    const roomsUrl = (backend === "remote" ? "" : BACKEND) + "/api/health";
+    if (backend === "local" && !BACKEND) { setPill("#roomsPill", "off", "Online rooms: not configured"); return; }
+    setPill("#roomsPill", "warn", "Online rooms: connecting…");
+    try {
+      const res = await fetch(roomsUrl, { headers: { "X-Session-Id": sid } });
+      const data = res.ok ? await res.json() : null;
+      if (data && data.ok) setPill("#roomsPill", "ok", `Online rooms: ready${data.rooms === "postgres" ? " · shared database" : ""}`);
+      else setPill("#roomsPill", "warn", "Online rooms: unavailable");
+    } catch (e) {
+      setPill("#roomsPill", "warn", "Online rooms: waking up, try again in a minute");
     }
   }
 
+  // ---------------------------------------------------------------- boot
   (async function boot() {
-    await detectBackend();
+    const backendReady = detectBackend();
 
-    // ?room=CODE in the address: open the lobby with the code filled in
     const params = new URLSearchParams(location.search);
     const roomParam = (params.get("room") || "").toUpperCase();
 
@@ -767,6 +1056,7 @@
       return;
     }
 
+    await backendReady;
     try {
       const data = await api("/api/state");
       score = data.score;

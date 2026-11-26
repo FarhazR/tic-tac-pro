@@ -122,11 +122,26 @@
 
         <div class="actions">
           <button type="button" id="offerDraw" disabled>Offer draw</button>
+          <button type="button" id="rematchBtn" class="accent" hidden>Rematch</button>
           <label class="toggle" id="scoresToggleWrap" hidden>
             <input type="checkbox" id="showScores"> <span id="scoresLabel">AI scores</span>
           </label>
         </div>
       </div>
+
+      <div class="card insight" id="insight" hidden>
+          <div class="ihead">
+            <span class="ititle">AI insight</span>
+            <span class="imeta" id="insightMeta"></span>
+          </div>
+          <p class="isub" id="insightSub"></p>
+          <div class="ibars" id="insightBars"></div>
+          <details class="itree" id="insightTreeWrap">
+            <summary>Search tree</summary>
+            <div class="itree-scroll"><svg id="insightTree" viewBox="0 0 640 300" width="100%" aria-label="MCTS search tree"></svg></div>
+            <p class="ilegend">Circle size = visits. Blue = the move played. Second row = the best replies the search explored.</p>
+          </details>
+        </div>
 
       <aside class="side">
         <div class="card queue" id="queueX">
@@ -167,7 +182,15 @@
       </form>
     </dialog>
 
-    <p class="backend-note" id="backendNote"></p>
+    <div class="meta">
+      <span class="pill" id="enginePill"><i class="dot"></i><span>Engine</span></span>
+      <span class="pill" id="roomsPill"><i class="dot"></i><span>Online rooms</span></span>
+      <button type="button" class="pill pill-btn" id="soundBtn" aria-pressed="true">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M4 9v6h4l5 4V5L8 9H4Zm12.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4Z"/></svg>
+        <span id="soundLabel">Sound on</span>
+      </button>
+    </div>
+    <div class="toast" id="toast" hidden></div>
 
     <dialog id="restartDialog">
       <form method="dialog">

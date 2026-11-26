@@ -102,6 +102,7 @@ class MinimaxAI:
         self.depth = depth
         self.nodes_searched = 0
         self.last_scores = None      # {move: root score} from the last choose_move
+        self.last_tree = None        # compact snapshot of the last search, for the UI
 
     def _evaluate(self, game):
         """Terminal evaluation: +1 win, -1 loss, 0 draw, None if not over."""
@@ -214,8 +215,16 @@ class MinimaxAI:
         self.last_scores = {move: round(score, 2) for move, score in scores.items()}
         best_score = max(scores.values())
         best_moves = [move for move, score in scores.items() if score == best_score]
-
-        return random.choice(best_moves)
+        chosen = random.choice(best_moves)
+        self.last_tree = {
+            "type": "minimax",
+            "depth": self.depth,
+            "nodes": self.nodes_searched,
+            "chosen": list(chosen),
+            "root": [{"move": list(m), "score": round(s, 2), "best": s == best_score}
+                     for m, s in scores.items()],
+        }
+        return chosen
 
 
 class MCTSNode:
@@ -262,6 +271,7 @@ class MCTS_AI:
         self.rng = rng or random
         self.last_scores = None      # {move: win rate} for the root's children
         self.last_visits = None      # {move: visits}
+        self.last_tree = None        # compact snapshot of the last search, for the UI
         self.nodes_searched = 0
 
     # ------------------------------------------------------------ stages
@@ -333,4 +343,21 @@ class MCTS_AI:
         best = self.rng.choice([c for c in root.children if c.visits == most_visits])
         self.last_scores = {c.move: round(c.wins / c.visits, 2) for c in root.children}
         self.last_visits = {c.move: c.visits for c in root.children}
+        self.last_tree = {
+            "type": "mcts",
+            "simulations": self.simulations,
+            "nodes": self.nodes_searched,
+            "chosen": list(best.move),
+            "root": [
+                {
+                    "move": list(c.move), "visits": c.visits, "win_rate": round(c.wins / c.visits, 2),
+                    "best": c is best,
+                    "children": [
+                        {"move": list(g.move), "visits": g.visits, "win_rate": round(g.wins / g.visits, 2)}
+                        for g in sorted(c.children, key=lambda n: -n.visits)[:3]
+                    ],
+                }
+                for c in sorted(root.children, key=lambda n: -n.visits)
+            ],
+        }
         return best.move

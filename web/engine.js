@@ -222,15 +222,47 @@
       return best;
     }
     scoreMoves(game) {
+      const search = this.startSearch(game);
+      while (!search.step(1)) { /* evaluate every root move */ }
+      return search.scores;
+    }
+    /** Steppable search: step(n) evaluates n more root moves; snapshot() is the UI tree. */
+    startSearch(game) {
+      const self = this;
       this.symbol = game.currentPlayer.symbol;
       this.nodesSearched = 0;
+      const legal = game.getLegalMoves();
       const scores = new Map();
-      for (const m of game.getLegalMoves()) {
-        const sim = game.copy();
-        sim.makeMove(m[0], m[1]);
-        scores.set(`${m[0]},${m[1]}`, this.minimax(sim, this.depth, false));
-      }
-      return scores;
+      let i = 0;
+      const search = {
+        scores, total: legal.length, get done() { return i; },
+        step(n) {
+          for (let k = 0; k < n && i < legal.length; k++, i++) {
+            const m = legal[i];
+            const sim = game.copy();
+            sim.makeMove(m[0], m[1]);
+            scores.set(`${m[0]},${m[1]}`, self.minimax(sim, self.depth, false));
+          }
+          return i >= legal.length;
+        },
+        snapshot() {
+          const vals = [...scores.values()];
+          const best = vals.length ? Math.max(...vals) : null;
+          return {
+            type: "minimax", depth: self.depth, nodes: self.nodesSearched, done: i, total: legal.length,
+            root: legal.map((m) => {
+              const k = `${m[0]},${m[1]}`;
+              const s = scores.has(k) ? Math.round(scores.get(k) * 100) / 100 : null;
+              return { move: m.slice(), score: s, best: s !== null && scores.get(k) === best, pending: !scores.has(k) };
+            }),
+          };
+        },
+        finish() {
+          while (!search.step(1)) { /* drain */ }
+          return search.snapshot();
+        },
+      };
+      return search;
     }
     chooseMove(game) {
       const legal = game.getLegalMoves();
@@ -239,7 +271,12 @@
       this.lastScores = new Map([...scores].map(([k, v]) => [k, Math.round(v * 100) / 100]));
       const best = Math.max(...scores.values());
       const bestMoves = [...scores.entries()].filter(([, s]) => s === best).map(([k]) => k.split(",").map(Number));
-      return choice(bestMoves);
+      const chosen = choice(bestMoves);
+      this.lastTree = {
+        type: "minimax", depth: this.depth, nodes: this.nodesSearched, chosen,
+        root: [...scores].map(([k, s]) => ({ move: k.split(",").map(Number), score: Math.round(s * 100) / 100, best: s === best })),
+      };
+      return chosen;
     }
   }
 
@@ -307,22 +344,60 @@
         else if (winner === node.mover) node.wins += 1;
       }
     }
+    /** Steppable search: step(n) runs n more simulations; snapshot() is the UI tree so far. */
+    startSearch(game) {
+      const self = this;
+      this.nodesSearched = 0;
+      const root = new MCTSNode(game.copy());
+      let done = 0;
+      const wr = (n) => (n.visits ? Math.round((n.wins / n.visits) * 100) / 100 : 0);
+      const search = {
+        root, total: this.simulations, get done() { return done; },
+        step(n) {
+          for (let k = 0; k < n && done < self.simulations; k++, done++) {
+            let node = root;
+            const path = [root];
+            while (!node.untried.length && node.children.length) { node = self.select(node); path.push(node); }
+            if (node.untried.length) { node = self.expand(node); path.push(node); }
+            self.backpropagate(path, self.rollout(node.game));
+          }
+          return done >= self.simulations;
+        },
+        snapshot() {
+          const most = root.children.length ? Math.max(...root.children.map((c) => c.visits)) : 0;
+          const ordered = [...root.children].sort((a, b) => (a.move[0] - b.move[0]) || (a.move[1] - b.move[1]));
+          return {
+            type: "mcts", simulations: self.simulations, nodes: self.nodesSearched, done, total: self.simulations,
+            root: ordered.map((c) => ({
+              move: c.move.slice(), visits: c.visits, win_rate: wr(c), best: c.visits === most && most > 0,
+              children: [...c.children].sort((a, b) => b.visits - a.visits).slice(0, 3)
+                .map((g) => ({ move: g.move.slice(), visits: g.visits, win_rate: wr(g) })),
+            })),
+          };
+        },
+        finish() { while (!search.step(128)) { /* drain */ } return search.snapshot(); },
+      };
+      return search;
+    }
     chooseMove(game) {
       const legal = game.getLegalMoves();
       if (!legal.length) return null;
-      this.nodesSearched = 0;
-      const root = new MCTSNode(game.copy());
-      for (let i = 0; i < this.simulations; i++) {
-        let node = root;
-        const path = [root];
-        while (!node.untried.length && node.children.length) { node = this.select(node); path.push(node); }
-        if (node.untried.length) { node = this.expand(node); path.push(node); }
-        this.backpropagate(path, this.rollout(node.game));
-      }
+      const search = this.startSearch(game);
+      search.finish();
+      const root = search.root;
       const most = Math.max(...root.children.map((c) => c.visits));
       const best = choice(root.children.filter((c) => c.visits === most));
       this.lastScores = new Map(root.children.map((c) => [`${c.move[0]},${c.move[1]}`, Math.round((c.wins / c.visits) * 100) / 100]));
       this.lastVisits = new Map(root.children.map((c) => [`${c.move[0]},${c.move[1]}`, c.visits]));
+      const wr = (n) => Math.round((n.wins / n.visits) * 100) / 100;
+      this.lastTree = {
+        type: "mcts", simulations: this.simulations, nodes: this.nodesSearched, chosen: best.move.slice(),
+        root: [...root.children].sort((a, b) => b.visits - a.visits).map((c) => ({
+          move: c.move.slice(), visits: c.visits, win_rate: wr(c), best: c === best,
+          children: [...c.children].sort((a, b) => b.visits - a.visits).slice(0, 3)
+            .map((g) => ({ move: g.move.slice(), visits: g.visits, win_rate: wr(g) })),
+        })),
+      };
       return best.move;
     }
   }
@@ -376,6 +451,7 @@
       this.ply = 0;
       this.lastMove = null;
       this.aiScores = null;
+      this.aiInsight = null;
       this.aiTimeMs = null;
       this.message = "X to move.";
       return this.state();
@@ -406,18 +482,28 @@
       if (!this._applyMove(r, c, "human")) bad("Illegal move: the cell is occupied or out of range.");
       return this.state();
     }
-    cpuMove() {
+    cpuMove(pre) {
       const game = this.game;
       if (!this.ai) bad("No CPU in a Player vs Player game.");
       if (game.gameOver) bad("The game is over.");
       if (game.currentPlayer !== game.player2) bad("It is not the CPU's turn.");
 
-      const start = performance.now();
-      const move = this.ai.chooseMove(game);
-      this.aiTimeMs = Math.round((performance.now() - start) * 10) / 10;
-      if (!move) bad("The CPU has no legal move.");
-      const scores = this.ai.lastScores || null;     // Minimax root scores / MCTS win rates
-      this.aiScores = scores ? Object.fromEntries(scores) : null;
+      let move;
+      if (pre && pre.move) {                        // decided by a live search run in the page
+        move = pre.move;
+        this.aiTimeMs = pre.time_ms ?? null;
+        this.aiScores = pre.scores || null;
+        this.aiInsight = pre.insight ? Object.assign({}, pre.insight, { time_ms: this.aiTimeMs }) : null;
+        if (!game.getLegalMoves().some(([r, c]) => r === move[0] && c === move[1])) bad("Illegal CPU move.");
+      } else {
+        const start = performance.now();
+        move = this.ai.chooseMove(game);
+        this.aiTimeMs = Math.round((performance.now() - start) * 10) / 10;
+        if (!move) bad("The CPU has no legal move.");
+        const scores = this.ai.lastScores || null;   // Minimax root scores / MCTS win rates
+        this.aiScores = scores ? Object.fromEntries(scores) : null;
+        this.aiInsight = this.ai.lastTree ? Object.assign({}, this.ai.lastTree, { time_ms: this.aiTimeMs }) : null;
+      }
       this._applyMove(move[0], move[1], "cpu");
       return this.state();
     }
@@ -463,6 +549,7 @@
         cpu_to_move: !!this.ai && !g.gameOver && g.currentPlayer === g.player2,
         last_move: this.lastMove,
         ai_scores: this.aiScores,
+        ai_insight: this.aiInsight,
         ai_time_ms: this.aiTimeMs,
         message: this.message,
       };
@@ -488,7 +575,7 @@
         }
         if (!session) throw new ApiError("No game yet. Start a new one.", 404);
         if (path === "/api/move") return resolve(session.humanMove(body.row, body.col));
-        if (path === "/api/cpu") return resolve(session.cpuMove());
+        if (path === "/api/cpu") return resolve(session.cpuMove(body));
         if (path === "/api/draw") return resolve(session.offerDraw(!!body.accept));
         throw new ApiError("Unknown endpoint.", 404);
       } catch (e) {
@@ -497,7 +584,19 @@
     });
   }
 
-  const TicTacPro = { Board, Player, Game, RandomAI, RuleBasedAI, MinimaxAI, MCTS_AI, Session, localApi, LINES, MAX_DEPTH, MAX_SIMULATIONS };
+  /** Rebuild a Game from an API state object (board, queues, current). */
+  function gameFromState(s) {
+    const g = new Game();
+    g.board.grid = s.board.map((row) => row.slice());
+    g.player1.moves = s.queues.X.map((m) => m.slice());
+    g.player2.moves = s.queues.O.map((m) => m.slice());
+    g.currentPlayer = s.current === "X" ? g.player1 : g.player2;
+    g.gameOver = !!s.game_over; g.winner = s.winner || null; g.draw = !!s.draw;
+    return g;
+  }
+
+  const TicTacPro = { Board, Player, Game, RandomAI, RuleBasedAI, MinimaxAI, MCTS_AI, Session, localApi,
+    gameFromState, localSession: () => session, LINES, MAX_DEPTH, MAX_SIMULATIONS };
   root.TicTacPro = TicTacPro;
   if (typeof module !== "undefined" && module.exports) module.exports = TicTacPro;
 })(typeof window !== "undefined" ? window : globalThis);

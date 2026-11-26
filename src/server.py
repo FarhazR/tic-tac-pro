@@ -94,6 +94,7 @@ class Session:
         self.ply = 0
         self.last_move = None
         self.ai_scores = None
+        self.ai_insight = None
         self.ai_time_ms = None
         self.message = "X to move."
         return self.state()
@@ -153,6 +154,9 @@ class Session:
             raise ValueError("The CPU has no legal move.")
         scores = getattr(self.ai, "last_scores", None)   # Minimax root scores / MCTS win rates
         self.ai_scores = {f"{r},{c}": s for (r, c), s in scores.items()} if scores else None
+        self.ai_insight = getattr(self.ai, "last_tree", None)
+        if self.ai_insight is not None:
+            self.ai_insight = dict(self.ai_insight, time_ms=self.ai_time_ms)
         self._apply_move(move[0], move[1], "cpu")
         return self.state()
 
@@ -204,6 +208,7 @@ class Session:
                             and game.current_player is game.player2),
             "last_move": self.last_move,
             "ai_scores": self.ai_scores,
+            "ai_insight": self.ai_insight,
             "ai_time_ms": self.ai_time_ms,
             "message": self.message,
         }

@@ -7,5 +7,5 @@
  * server, for example "https://tic-tac-pro.onrender.com".
  */
 window.TTP_CONFIG = {
-  backend: "",
+  backend: "https://tic-tac-pro.onrender.com",
 };

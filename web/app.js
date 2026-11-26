@@ -206,6 +206,9 @@
       drawDialog.close("decline");
     }
 
+    // a rematch started elsewhere: close our result card
+    if (view.status === "playing" && !view.game_over && !overlay.hidden) hideOverlay();
+
     // game over: show the result once per round
     if (view.status === "playing" && view.game_over && online.shownOver !== view.round) {
       online.shownOver = view.round;

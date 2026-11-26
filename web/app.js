@@ -32,7 +32,12 @@
   let animate = false;
 
   // ---------------------------------------------------------------- api
+  // "remote": the Python server in src/server.py.  "local": the JavaScript port
+  // in engine.js, used on static hosts (no server) or when the server is down.
+  let backend = "remote";
+
   async function api(path, body) {
+    if (backend === "local") return window.TicTacPro.localApi(path, body);
     const res = await fetch(path, {
       method: body === undefined ? "GET" : "POST",
       headers: { "Content-Type": "application/json", "X-Session-Id": sid },
@@ -392,7 +397,28 @@
   }
 
   // ---------------------------------------------------------------- boot
+  async function detectBackend() {
+    try {
+      const res = await fetch("/api/health", { headers: { "X-Session-Id": sid } });
+      const data = res.ok ? await res.json() : null;
+      backend = data && data.ok && !data.local ? "remote" : "local";
+    } catch (e) {
+      backend = "local";
+    }
+    if (backend === "local" && !window.TicTacPro) {
+      backend = "remote";                 // engine.js missing: keep trying the server
+      return;
+    }
+    const note = $("#backendNote");
+    if (note) {
+      note.textContent = backend === "remote"
+        ? "Engine: Python server (src/server.py)"
+        : "Engine: running in your browser (web/engine.js, a port of the Python engine)";
+    }
+  }
+
   (async function boot() {
+    await detectBackend();
     try {
       const data = await api("/api/state");
       score = data.score;

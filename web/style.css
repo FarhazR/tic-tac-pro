@@ -465,6 +465,14 @@ button.primary:active { transform: translateY(3px); box-shadow: 0 2px 0 var(--x-
 .log p b { color: var(--navy); font-weight: 800; }
 .log .muted { animation: none; }
 
+.backend-note {
+  margin: 18px 0 0;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
 /* ---------------------------------------------------------------- overlay (cut transition) */
 .overlay {
   position: fixed;

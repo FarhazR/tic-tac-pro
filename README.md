@@ -63,33 +63,57 @@ The server is `src/server.py` (one `Session` per visitor, keyed by an
 `/api/new`, `/api/move`, `/api/cpu`, `/api/draw`, `/api/health`); the UI is
 `web/`. It is plain `http.server`, so it needs no packages.
 
-## Deploy to Hugging Face Spaces
+## Two ways the browser version can run
 
-The repo already contains the three things a Docker Space needs: the YAML
-front matter at the top of this README (`sdk: docker`, `app_port: 7860`), a
-`Dockerfile`, and a server that binds `0.0.0.0:7860` when `HOST`/`PORT` are set.
+- **With the Python server** (`python run.py`): the page talks to
+  `src/server.py`, which drives the Python engine and AIs.
+- **Without any server**: `web/engine.js` is a line-for-line port of the
+  engine and the three AIs. If the page cannot reach `/api/health` it switches
+  to the in-browser engine automatically, so the `web/` folder works on any
+  static host. `tests/test_js_engine.py` replays random games and Minimax
+  positions through both implementations and requires identical results. The
+  small note under the board says which engine is in use.
 
-1. Create a Space at https://huggingface.co/new-space with **SDK: Docker**
-   (template *Blank*), public or private as you like.
-2. Push this repository to it:
+## Deploy to Hugging Face Spaces (free, Static Space)
+
+Hugging Face now puts Docker and Gradio Spaces behind a paid plan; Static
+Spaces stay free. The `web/` folder is a complete static site, including its
+own `README.md` with the `sdk: static` front matter, so you publish just that
+folder.
+
+1. Create a Space at https://huggingface.co/new-space, choose **Static** as
+   the SDK, template *Blank*, and create it.
+2. From the repository root, push only the `web/` folder as the Space's
+   `main` branch:
 
    ```powershell
    git remote add hf https://huggingface.co/spaces/<your-user>/<space-name>
-   git push hf fix/audit-issues:main
    ```
 
-   Use a Hugging Face access token with *write* permission as the password
-   when git asks. (Or upload the files through the Space's *Files* tab:
-   `Dockerfile`, `README.md`, `run.py`, `src/`, `web/`.)
-3. The Space builds the image and starts `python run.py --no-browser`; the
-   *Logs* tab shows `Tic-Tac-Pro running at http://0.0.0.0:7860`. Open the
-   Space URL and play.
+   ```powershell
+   git subtree push --prefix web hf main
+   ```
 
-Notes: each visitor gets their own game (sessions expire after two hours of
-inactivity); Minimax depth is capped at 5 so a CPU move stays well under a
-second on the free CPU tier; nothing is written to disk.
+   When git asks for a password, use a Hugging Face access token with
+   *write* permission (https://huggingface.co/settings/tokens). If the Space
+   already has a commit and the push is rejected, run
+   `git push hf $(git subtree split --prefix web fix/audit-issues):main --force`
+   once; afterwards `git subtree push` works.
 
-Run the same container locally:
+   No git? Open the Space's *Files* tab and upload `index.html`,
+   `style.css`, `app.js`, `engine.js` and `README.md` from `web/`.
+3. The Space serves `index.html` straight away. Open the Space URL and play;
+   the note under the board reads "running in your browser".
+
+Each later `git subtree push` redeploys. Scores live in the visitor's tab.
+
+## Deploy the Python server instead (paid or self-hosted)
+
+The repo also carries a `Dockerfile` and the `sdk: docker` front matter at
+the top of this README, for a Docker Space on a PRO account or any container
+host (Render, Fly.io, a VPS). The server binds `0.0.0.0:7860` when `HOST` and
+`PORT` are set, caps Minimax depth at 5, keeps one game per visitor and
+writes nothing to disk.
 
 ```powershell
 docker build -t tic-tac-pro .

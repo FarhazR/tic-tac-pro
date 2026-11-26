@@ -19,6 +19,7 @@
   ];
   const CORNERS = ["0,0", "0,2", "2,0", "2,2"];
   const MAX_DEPTH = 5;
+  const MAX_SIMULATIONS = 3000;
 
   const choice = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
@@ -235,9 +236,94 @@
       const legal = game.getLegalMoves();
       if (!legal.length) return null;
       const scores = this.scoreMoves(game);
+      this.lastScores = new Map([...scores].map(([k, v]) => [k, Math.round(v * 100) / 100]));
       const best = Math.max(...scores.values());
       const bestMoves = [...scores.entries()].filter(([, s]) => s === best).map(([k]) => k.split(",").map(Number));
       return choice(bestMoves);
+    }
+  }
+
+  // ------------------------------------------------------------------ MCTS (port of src/ai.py)
+  class MCTSNode {
+    constructor(game, parent = null, move = null, mover = null) {
+      this.game = game;
+      this.parent = parent;
+      this.move = move;
+      this.mover = mover;          // symbol that moved into this node; wins are from its view
+      this.children = [];
+      this.untried = game.gameOver ? [] : game.getLegalMoves();
+      this.visits = 0;
+      this.wins = 0;
+    }
+  }
+
+  class MCTS_AI {
+    constructor(simulations = 500, exploration = Math.SQRT2, rolloutLimit = 30) {
+      this.simulations = simulations;
+      this.exploration = exploration;
+      this.rolloutLimit = rolloutLimit;
+      this.lastScores = null;      // Map "r,c" -> win rate
+      this.lastVisits = null;
+      this.nodesSearched = 0;
+    }
+    select(node) {
+      const logN = Math.log(node.visits);
+      let best = null, bestValue = -Infinity;
+      for (const c of node.children) {
+        const v = c.wins / c.visits + this.exploration * Math.sqrt(logN / c.visits);
+        if (v > bestValue) { bestValue = v; best = c; }
+      }
+      return best;
+    }
+    expand(node) {
+      const i = Math.floor(Math.random() * node.untried.length);
+      const move = node.untried.splice(i, 1)[0];
+      const sim = node.game.copy();
+      sim.makeMove(move[0], move[1]);
+      const child = new MCTSNode(sim, node, move, node.game.currentPlayer.symbol);
+      node.children.push(child);
+      this.nodesSearched++;
+      return child;
+    }
+    rollout(game) {
+      if (game.gameOver) return game.winner;
+      const sim = game.copy();
+      const seen = new Set([sim.stateKey()]);
+      for (let i = 0; i < this.rolloutLimit; i++) {
+        const m = choice(sim.getLegalMoves());
+        sim.makeMove(m[0], m[1]);
+        if (sim.gameOver) return sim.winner;
+        const key = sim.stateKey();
+        if (seen.has(key)) return null;      // repetition counts as a draw
+        seen.add(key);
+      }
+      return null;                           // ply cap counts as a draw
+    }
+    backpropagate(path, winner) {
+      for (const node of path) {
+        node.visits++;
+        if (node.mover === null) continue;
+        if (winner === null) node.wins += 0.5;
+        else if (winner === node.mover) node.wins += 1;
+      }
+    }
+    chooseMove(game) {
+      const legal = game.getLegalMoves();
+      if (!legal.length) return null;
+      this.nodesSearched = 0;
+      const root = new MCTSNode(game.copy());
+      for (let i = 0; i < this.simulations; i++) {
+        let node = root;
+        const path = [root];
+        while (!node.untried.length && node.children.length) { node = this.select(node); path.push(node); }
+        if (node.untried.length) { node = this.expand(node); path.push(node); }
+        this.backpropagate(path, this.rollout(node.game));
+      }
+      const most = Math.max(...root.children.map((c) => c.visits));
+      const best = choice(root.children.filter((c) => c.visits === most));
+      this.lastScores = new Map(root.children.map((c) => [`${c.move[0]},${c.move[1]}`, Math.round((c.wins / c.visits) * 100) / 100]));
+      this.lastVisits = new Map(root.children.map((c) => [`${c.move[0]},${c.move[1]}`, c.visits]));
+      return best.move;
     }
   }
 
@@ -245,6 +331,7 @@
     random: ["Random", () => new RandomAI()],
     rule: ["Rule-Based", () => new RuleBasedAI()],
     minimax: ["Minimax", (depth) => new MinimaxAI(depth)],
+    mcts: ["MCTS", (depth, sims) => new MCTS_AI(sims)],
   };
 
   function winningLine(board, symbol) {
@@ -265,23 +352,26 @@
       this.score = { X: 0, O: 0, draw: 0 };
       this.newGame();
     }
-    newGame(mode = "pvp", difficulty = "minimax", depth = 3) {
+    newGame(mode = "pvp", difficulty = "minimax", depth = 3, simulations = 500) {
       if (mode !== "pvp" && mode !== "pvc") bad("mode must be 'pvp' or 'pvc'");
-      if (!DIFFICULTIES[difficulty]) bad("difficulty must be one of: random, rule, minimax");
+      if (!DIFFICULTIES[difficulty]) bad("difficulty must be one of: random, rule, minimax, mcts");
       depth = parseInt(depth, 10);
-      if (Number.isNaN(depth)) bad("depth must be an integer");
+      simulations = parseInt(simulations, 10);
+      if (Number.isNaN(depth) || Number.isNaN(simulations)) bad("depth and simulations must be integers");
       depth = Math.max(1, Math.min(depth, MAX_DEPTH));
+      simulations = Math.max(50, Math.min(simulations, MAX_SIMULATIONS));
 
       this.game = new Game();
       this.mode = mode;
       this.depth = depth;
+      this.simulations = simulations;
       this.ai = null;
       this.difficulty = null;
       this.difficultyName = null;
       if (mode === "pvc") {
         this.difficulty = difficulty;
         this.difficultyName = DIFFICULTIES[difficulty][0];
-        this.ai = DIFFICULTIES[difficulty][1](depth);
+        this.ai = DIFFICULTIES[difficulty][1](depth, simulations);
       }
       this.ply = 0;
       this.lastMove = null;
@@ -323,17 +413,11 @@
       if (game.currentPlayer !== game.player2) bad("It is not the CPU's turn.");
 
       const start = performance.now();
-      let scores = null, move;
-      if (this.ai.scoreMoves) {
-        scores = this.ai.scoreMoves(game);
-        const best = Math.max(...scores.values());
-        move = choice([...scores.entries()].filter(([, s]) => s === best).map(([k]) => k.split(",").map(Number)));
-      } else {
-        move = this.ai.chooseMove(game);
-      }
+      const move = this.ai.chooseMove(game);
       this.aiTimeMs = Math.round((performance.now() - start) * 10) / 10;
       if (!move) bad("The CPU has no legal move.");
-      this.aiScores = scores ? Object.fromEntries([...scores].map(([k, s]) => [k, Math.round(s * 100) / 100])) : null;
+      const scores = this.ai.lastScores || null;     // Minimax root scores / MCTS win rates
+      this.aiScores = scores ? Object.fromEntries(scores) : null;
       this._applyMove(move[0], move[1], "cpu");
       return this.state();
     }
@@ -374,6 +458,7 @@
         difficulty: this.difficulty,
         difficulty_name: this.difficultyName,
         depth: this.difficulty === "minimax" ? this.depth : null,
+        simulations: this.difficulty === "mcts" ? this.simulations : null,
         cpu_symbol: this.ai ? "O" : null,
         cpu_to_move: !!this.ai && !g.gameOver && g.currentPlayer === g.player2,
         last_move: this.lastMove,
@@ -399,7 +484,7 @@
         if (body === undefined) throw new ApiError("Unknown endpoint.", 404);
         if (path === "/api/new") {
           if (!session) session = new Session();
-          return resolve(session.newGame(body.mode ?? "pvp", body.difficulty ?? "minimax", body.depth ?? 3));
+          return resolve(session.newGame(body.mode ?? "pvp", body.difficulty ?? "minimax", body.depth ?? 3, body.simulations ?? 500));
         }
         if (!session) throw new ApiError("No game yet. Start a new one.", 404);
         if (path === "/api/move") return resolve(session.humanMove(body.row, body.col));
@@ -412,7 +497,7 @@
     });
   }
 
-  const TicTacPro = { Board, Player, Game, RandomAI, RuleBasedAI, MinimaxAI, Session, localApi, LINES, MAX_DEPTH };
+  const TicTacPro = { Board, Player, Game, RandomAI, RuleBasedAI, MinimaxAI, MCTS_AI, Session, localApi, LINES, MAX_DEPTH, MAX_SIMULATIONS };
   root.TicTacPro = TicTacPro;
   if (typeof module !== "undefined" && module.exports) module.exports = TicTacPro;
 })(typeof window !== "undefined" ? window : globalThis);

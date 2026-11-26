@@ -18,9 +18,11 @@ out), and victory is checked *after* the expiration. The board therefore never
 fills up, and a position is defined by the board **and** both players' move
 queues, not the board alone.
 
-The project is a testbed for adversarial search: Random, Rule-Based and
-depth-limited Minimax players exist, and Monte Carlo Tree Search is the planned
-addition and comparison target.
+The project is a testbed for adversarial search. Four players share one
+engine: Random, Rule-Based, depth-limited Minimax (alpha-beta) and Monte Carlo
+Tree Search (UCT, capped random rollouts, repetition counted as a draw).
+`benchmark.py` plays them against each other; `benchmark_results.md` holds
+the latest run.
 
 ## Layout
 
@@ -29,11 +31,12 @@ src/
   board.py    3×3 grid: place / remove / win check / display
   player.py   symbol + FIFO deque of at most 3 active moves
   game.py     rules, turn order, expiration, draw flag, copy(), legal moves, state_key()
-  ai.py       RandomAI, RuleBasedAI, MinimaxAI  (all expose choose_move(game))
+  ai.py       RandomAI, RuleBasedAI, MinimaxAI, MCTS_AI  (all expose choose_move(game))
   main.py     terminal interface
   server.py   local web server: JSON API over the same engine
 web/          browser UI (index.html, style.css, app.js)
 run.py        starts the web server and opens the browser
+benchmark.py  round-robin benchmark of the AI players
 tests/        pytest suite
 ```
 
@@ -51,12 +54,14 @@ This starts one local process that serves the web UI **and** the game API
 On Windows you can also double-click `run.bat`. Options: `--port 9000`,
 `--no-browser`.
 
-Pick two players or versus CPU (Random, Rule-Based or Minimax with a depth),
+Pick two players or versus CPU (Random, Rule-Based, Minimax with a depth, or
+MCTS with a simulation budget),
 press *Start game*, click cells to play, and use *Offer draw* as in the terminal
 game. Settings lock while a game is in progress; *Restart* unlocks them. The
-cell holding the current player's oldest symbol is dashed, and against Minimax
-you can tick *Minimax scores* to see the root score it gave every cell. Wins
-and draws are counted per browser tab.
+cell holding the current player's oldest symbol is dashed. Against Minimax or
+MCTS you can tick the scores box to see the root score (Minimax) or the win
+rate (MCTS) the search gave every cell. Wins and draws are counted per browser
+tab.
 
 The server is `src/server.py` (one `Session` per visitor, keyed by an
 `X-Session-Id` header the page generates, plus a JSON API: `/api/state`,
@@ -142,3 +147,16 @@ python -m pytest
   indefinitely. Any AI-vs-AI simulation needs a ply cap or a repetition rule.
 - Random vs Random: X wins ≈ 54 %, O ≈ 46 %.
 - Minimax cost grows ≈ 5× per extra ply without pruning.
+- MCTS needs a rollout cap and a repetition rule or its rollouts can run
+  forever; with both, 500 simulations take about 0.1 s in Python and about
+  20 ms in the browser port.
+
+## Benchmark
+
+```powershell
+python benchmark.py --games 15
+```
+
+Plays every pairing with both colours (60-ply cap counted as a draw) and
+writes `benchmark_results.md` with wins, draws, losses and decision time per
+move.

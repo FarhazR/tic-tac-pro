@@ -52,9 +52,18 @@
             <button type="button" data-difficulty="random">Random</button>
             <button type="button" data-difficulty="rule">Rule-Based</button>
             <button type="button" data-difficulty="minimax" class="active">Minimax</button>
+            <button type="button" data-difficulty="mcts">MCTS</button>
           </div>
           <label class="depth" id="depthField">Depth
             <input type="number" id="depth" min="1" max="5" value="3" inputmode="numeric">
+          </label>
+          <label class="depth" id="simsField" hidden>Simulations
+            <select id="sims">
+              <option value="200">200</option>
+              <option value="500" selected>500</option>
+              <option value="1000">1000</option>
+              <option value="2000">2000</option>
+            </select>
           </label>
         </div>
         <button type="button" class="primary" id="newGame">Start game</button>
@@ -86,7 +95,7 @@
         <div class="actions">
           <button type="button" id="offerDraw" disabled>Offer draw</button>
           <label class="toggle" id="scoresToggleWrap" hidden>
-            <input type="checkbox" id="showScores"> Minimax scores
+            <input type="checkbox" id="showScores"> <span id="scoresLabel">AI scores</span>
           </label>
         </div>
       </div>

@@ -21,22 +21,22 @@ API (all JSON, all need ``X-Session-Id``):
                                         PvC: the CPU always declines
 """
 import json
-import random
 import re
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from src.ai import MinimaxAI, RandomAI, RuleBasedAI
+from src.ai import MCTS_AI, MinimaxAI, RandomAI, RuleBasedAI
 from src.game import Game
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 DIFFICULTIES = {
-    "random": ("Random", lambda depth: RandomAI()),
-    "rule": ("Rule-Based", lambda depth: RuleBasedAI()),
-    "minimax": ("Minimax", lambda depth: MinimaxAI(depth=depth)),
+    "random": ("Random", lambda depth, sims: RandomAI()),
+    "rule": ("Rule-Based", lambda depth, sims: RuleBasedAI()),
+    "minimax": ("Minimax", lambda depth, sims: MinimaxAI(depth=depth)),
+    "mcts": ("MCTS", lambda depth, sims: MCTS_AI(simulations=sims)),
 }
 
 LINES = (
@@ -45,7 +45,8 @@ LINES = (
     ((0, 0), (1, 1), (2, 2)), ((0, 2), (1, 1), (2, 0)),
 )
 
-MAX_DEPTH = 5  # keeps a hosted CPU move well under a second
+MAX_DEPTH = 5           # keeps a hosted Minimax move well under a second
+MAX_SIMULATIONS = 3000  # same for MCTS (500 simulations take about 0.1 s)
 
 
 def winning_line(board, symbol):
@@ -65,26 +66,28 @@ class Session:
         self.new_game()
 
     # ------------------------------------------------------------ control
-    def new_game(self, mode="pvp", difficulty="minimax", depth=3):
+    def new_game(self, mode="pvp", difficulty="minimax", depth=3, simulations=500):
         if mode not in ("pvp", "pvc"):
             raise ValueError("mode must be 'pvp' or 'pvc'")
         if difficulty not in DIFFICULTIES:
             raise ValueError("difficulty must be one of: " + ", ".join(DIFFICULTIES))
         try:
             depth = max(1, min(int(depth), MAX_DEPTH))
+            simulations = max(50, min(int(simulations), MAX_SIMULATIONS))
         except (TypeError, ValueError):
-            raise ValueError("depth must be an integer")
+            raise ValueError("depth and simulations must be integers")
 
         self.game = Game()
         self.mode = mode
         self.depth = depth
+        self.simulations = simulations
         self.ai = None
         self.difficulty = None
         self.difficulty_name = None
         if mode == "pvc":
             self.difficulty = difficulty
             self.difficulty_name, factory = DIFFICULTIES[difficulty]
-            self.ai = factory(depth)
+            self.ai = factory(depth, simulations)
         self.ply = 0
         self.last_move = None
         self.ai_scores = None
@@ -140,19 +143,13 @@ class Session:
             raise ValueError("It is not the CPU's turn.")
 
         start = time.perf_counter()
-        scores = None
-        if hasattr(self.ai, "score_moves"):
-            scores = self.ai.score_moves(game)
-            best = max(scores.values())
-            move = random.choice([m for m, s in scores.items() if s == best])
-        else:
-            move = self.ai.choose_move(game)
+        move = self.ai.choose_move(game)
         self.ai_time_ms = round((time.perf_counter() - start) * 1000, 1)
 
         if move is None:
             raise ValueError("The CPU has no legal move.")
-        self.ai_scores = ({f"{r},{c}": round(s, 2) for (r, c), s in scores.items()}
-                          if scores else None)
+        scores = getattr(self.ai, "last_scores", None)   # Minimax root scores / MCTS win rates
+        self.ai_scores = {f"{r},{c}": s for (r, c), s in scores.items()} if scores else None
         self._apply_move(move[0], move[1], "cpu")
         return self.state()
 
@@ -198,6 +195,7 @@ class Session:
             "difficulty": self.difficulty,
             "difficulty_name": self.difficulty_name,
             "depth": self.depth if self.difficulty == "minimax" else None,
+            "simulations": self.simulations if self.difficulty == "mcts" else None,
             "cpu_symbol": "O" if self.ai is not None else None,
             "cpu_to_move": (self.ai is not None and not game.game_over
                             and game.current_player is game.player2),
@@ -323,6 +321,7 @@ class Handler(SimpleHTTPRequestHandler):
                         mode=data.get("mode", "pvp"),
                         difficulty=data.get("difficulty", "minimax"),
                         depth=data.get("depth", 3),
+                        simulations=data.get("simulations", 500),
                     )
                 return self._json(200, result)
 

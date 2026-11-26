@@ -1,3 +1,4 @@
+import math
 import random
 
 class RandomAI:
@@ -100,6 +101,7 @@ class MinimaxAI:
         self.symbol = None
         self.depth = depth
         self.nodes_searched = 0
+        self.last_scores = None      # {move: root score} from the last choose_move
 
     def _evaluate(self, game):
         """Terminal evaluation: +1 win, -1 loss, 0 draw, None if not over."""
@@ -209,7 +211,126 @@ class MinimaxAI:
             return None
 
         scores = self.score_moves(game)
+        self.last_scores = {move: round(score, 2) for move, score in scores.items()}
         best_score = max(scores.values())
         best_moves = [move for move, score in scores.items() if score == best_score]
 
         return random.choice(best_moves)
+
+
+class MCTSNode:
+    """One node of the Monte Carlo search tree.
+
+    `mover` is the symbol of the player whose move led into this node; `wins`
+    is counted from that player's point of view, which is what the parent
+    needs when it picks among its children.
+    """
+
+    __slots__ = ("game", "parent", "move", "mover", "children", "untried", "visits", "wins")
+
+    def __init__(self, game, parent=None, move=None, mover=None):
+        self.game = game
+        self.parent = parent
+        self.move = move
+        self.mover = mover
+        self.children = []
+        self.untried = [] if game.game_over else game.get_legal_moves()
+        self.visits = 0
+        self.wins = 0.0
+
+
+class MCTS_AI:
+    """Monte Carlo Tree Search with UCT selection.
+
+    Each simulation runs the four classic stages through the real engine:
+        selection       descend by UCT while a node is fully expanded
+        expansion       add one child for an untried legal move
+        simulation      random rollout, capped at `rollout_limit` plies;
+                        a repeated complete state ends the rollout as a draw
+        backpropagation add the result along the visited path
+    After `simulations` iterations the most-visited root child is played.
+
+    The rollout cap and the repetition rule exist because Tic-Tac-Pro games
+    can cycle forever (see tests/test_ai.py::test_game_state_can_repeat); they
+    are search safeguards, not game rules.
+    """
+
+    def __init__(self, simulations=500, exploration=math.sqrt(2), rollout_limit=30, rng=None):
+        self.simulations = simulations
+        self.exploration = exploration
+        self.rollout_limit = rollout_limit
+        self.rng = rng or random
+        self.last_scores = None      # {move: win rate} for the root's children
+        self.last_visits = None      # {move: visits}
+        self.nodes_searched = 0
+
+    # ------------------------------------------------------------ stages
+    def _select(self, node):
+        log_n = math.log(node.visits)
+        return max(
+            node.children,
+            key=lambda c: c.wins / c.visits + self.exploration * math.sqrt(log_n / c.visits),
+        )
+
+    def _expand(self, node):
+        move = self.rng.choice(node.untried)
+        node.untried.remove(move)
+        simulated_game = node.game.copy()
+        simulated_game.make_move(*move)
+        child = MCTSNode(simulated_game, node, move, node.game.current_player.symbol)
+        node.children.append(child)
+        self.nodes_searched += 1
+        return child
+
+    def _rollout(self, game):
+        """Return the winner's symbol, or None for a draw (cap or repetition)."""
+        if game.game_over:
+            return game.winner
+        simulated_game = game.copy()
+        seen = {simulated_game.state_key()}
+        for _ in range(self.rollout_limit):
+            simulated_game.make_move(*self.rng.choice(simulated_game.get_legal_moves()))
+            if simulated_game.game_over:
+                return simulated_game.winner
+            key = simulated_game.state_key()
+            if key in seen:
+                return None
+            seen.add(key)
+        return None
+
+    @staticmethod
+    def _backpropagate(path, winner):
+        for node in path:
+            node.visits += 1
+            if node.mover is None:
+                continue
+            if winner is None:
+                node.wins += 0.5
+            elif winner == node.mover:
+                node.wins += 1
+
+    # ------------------------------------------------------------ interface
+    def choose_move(self, game):
+        legal_moves = game.get_legal_moves()
+        if not legal_moves:
+            return None
+
+        self.nodes_searched = 0
+        root = MCTSNode(game.copy())
+
+        for _ in range(self.simulations):
+            node = root
+            path = [root]
+            while not node.untried and node.children:
+                node = self._select(node)
+                path.append(node)
+            if node.untried:
+                node = self._expand(node)
+                path.append(node)
+            self._backpropagate(path, self._rollout(node.game))
+
+        most_visits = max(child.visits for child in root.children)
+        best = self.rng.choice([c for c in root.children if c.visits == most_visits])
+        self.last_scores = {c.move: round(c.wins / c.visits, 2) for c in root.children}
+        self.last_visits = {c.move: c.visits for c in root.children}
+        return best.move

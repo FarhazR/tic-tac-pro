@@ -25,7 +25,7 @@
     try { sessionStorage.setItem(SID_KEY, sid); } catch (e) { /* ignore */ }
   }
 
-  const settings = { mode: "pvp", difficulty: "minimax", depth: 3 };
+  const settings = { mode: "pvp", difficulty: "minimax", depth: 3, simulations: 500 };
   let state = null;          // null = idle (no game on the board)
   let score = { X: 0, O: 0, draw: 0 };
   let busy = false;
@@ -52,17 +52,21 @@
   const modeBtns = Array.from(document.querySelectorAll("[data-mode]"));
   const diffBtns = Array.from(document.querySelectorAll("[data-difficulty]"));
   const depthInput = $("#depth");
+  const simsSelect = $("#sims");
 
   function syncSetup() {
     modeBtns.forEach((b) => b.classList.toggle("active", b.dataset.mode === settings.mode));
     diffBtns.forEach((b) => b.classList.toggle("active", b.dataset.difficulty === settings.difficulty));
     $("#difficultyField").hidden = settings.mode !== "pvc";
-    $("#depthField").style.visibility = settings.difficulty === "minimax" ? "visible" : "hidden";
+    $("#depthField").hidden = settings.difficulty !== "minimax";
+    $("#simsField").hidden = settings.difficulty !== "mcts";
     depthInput.value = settings.depth;
+    simsSelect.value = String(settings.simulations);
 
     const locked = !!(state && state.in_progress);
     modeBtns.concat(diffBtns).forEach((b) => { b.disabled = locked; });
     depthInput.disabled = locked;
+    simsSelect.disabled = locked;
     lockNote.hidden = !locked;
     newGameBtn.textContent = !state ? "Start game" : locked ? "Restart" : "Play again";
   }
@@ -73,6 +77,7 @@
     settings.depth = Math.max(1, Math.min(5, Number(depthInput.value) || 3));
     depthInput.value = settings.depth;
   });
+  simsSelect.addEventListener("change", () => { settings.simulations = Number(simsSelect.value) || 500; });
 
   newGameBtn.addEventListener("click", () => {
     if (state && state.in_progress) {
@@ -246,10 +251,20 @@
   }
 
   // ---------------------------------------------------------------- render
+  function cpuLabel(s) {
+    if (s.difficulty === "minimax") return `Minimax d${s.depth}`;
+    if (s.difficulty === "mcts") return `MCTS ${s.simulations}`;
+    return s.difficulty_name;
+  }
+
   function describe(s) {
     if (s.mode === "pvp") return "two players";
-    const d = s.difficulty === "minimax" ? `Minimax (depth ${s.depth})` : s.difficulty_name;
-    return `you (X) vs CPU ${d} (O)`;
+    return `you (X) vs CPU ${cpuLabel(s)} (O)`;
+  }
+
+  function formatScore(s, value) {
+    if (s.difficulty === "mcts") return `${Math.round(value * 100)}%`;
+    return value > 0 ? `+${value}` : `${value}`;
   }
 
   function render() {
@@ -299,7 +314,7 @@
         if (sc !== undefined) {
           const tag = document.createElement("span");
           tag.className = "score" + (sc === best ? " best" : "");
-          tag.textContent = sc > 0 ? `+${sc}` : `${sc}`;
+          tag.textContent = formatScore(state, sc);
           cell.appendChild(tag);
         }
       }
@@ -313,7 +328,7 @@
     po.classList.toggle("winner", !idle && state.winner === "O");
     const pvc = !idle && state.mode === "pvc";
     $("#nameX").textContent = pvc ? "You" : "Player X";
-    $("#nameO").textContent = pvc ? `CPU · ${state.difficulty === "minimax" ? "Minimax d" + state.depth : state.difficulty_name}` : "Player O";
+    $("#nameO").textContent = pvc ? `CPU · ${cpuLabel(state)}` : "Player O";
 
     // status
     statusEl.className = "status";
@@ -332,7 +347,8 @@
     }
 
     drawBtn.disabled = idle || state.game_over || state.cpu_to_move;
-    scoresToggleWrap.hidden = !(pvc && state.difficulty === "minimax");
+    scoresToggleWrap.hidden = !(pvc && (state.difficulty === "minimax" || state.difficulty === "mcts"));
+    $("#scoresLabel").textContent = pvc && state.difficulty === "mcts" ? "MCTS win rates" : "Minimax scores";
 
     renderQueue("#queueX", idle ? [] : state.queues.X);
     renderQueue("#queueO", idle ? [] : state.queues.O);
@@ -427,6 +443,7 @@
         settings.mode = data.mode;
         if (data.difficulty) settings.difficulty = data.difficulty;
         if (data.depth) settings.depth = data.depth;
+        if (data.simulations) settings.simulations = data.simulations;
         log("Game restored.");
       }
     } catch (e) {

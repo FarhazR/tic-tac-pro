@@ -1,11 +1,12 @@
 from src.game import Game
-from src.ai import RandomAI, RuleBasedAI, MinimaxAI
+from src.ai import MCTS_AI, MinimaxAI, RandomAI, RuleBasedAI
 
 
 DIFFICULTIES = {
     "1": ("Random", lambda: RandomAI()),
     "2": ("Rule-Based", lambda: RuleBasedAI()),
     "3": ("Minimax (depth 3)", lambda: MinimaxAI(depth=3)),
+    "4": ("MCTS (500 simulations)", lambda: MCTS_AI(simulations=500)),
 }
 
 
@@ -68,7 +69,7 @@ def main():
             print(f"{key}. {name}")
         print()
 
-        difficulty = choose_option("Enter 1, 2 or 3: ", tuple(DIFFICULTIES))
+        difficulty = choose_option("Enter 1, 2, 3 or 4: ", tuple(DIFFICULTIES))
         name, factory = DIFFICULTIES[difficulty]
         ai = factory()
         print(f"CPU difficulty: {name}")

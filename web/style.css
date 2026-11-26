@@ -197,7 +197,15 @@ h1 {
   color: var(--ink);
   font: 800 15px var(--font);
 }
-.depth input:disabled { opacity: 0.55; cursor: not-allowed; }
+.depth input:disabled, .depth select:disabled { opacity: 0.55; cursor: not-allowed; }
+.depth select {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  font: 800 15px var(--font);
+}
 
 button.primary {
   margin-left: auto;

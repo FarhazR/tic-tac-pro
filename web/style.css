@@ -605,8 +605,6 @@ button.primary:active { transform: translateY(3px); box-shadow: 0 2px 0 var(--x-
   .arena.with-insight .insight { grid-column: auto; grid-row: auto; position: static; }
   .arena.with-insight .side { grid-column: auto; grid-row: auto; grid-template-columns: 1fr; }
 }
-  .insight .ibars { grid-template-columns: 1fr; }
-}
 
 /* ---------------------------------------------------------------- overlay (cut transition) */
 .overlay {

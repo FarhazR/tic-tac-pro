@@ -651,7 +651,7 @@
     overlay.classList.add("show");
     const outcome = outcomeFor(s);
     Sound.play(outcome);
-    if (outcome === "win") confetti();
+    if (!s.draw) confetti(s.winner, outcome === "win" ? 1 : 0.5);
   }
 
   function hideOverlay() {
@@ -660,14 +660,21 @@
     $("#confetti").innerHTML = "";
   }
 
-  function confetti() {
+  const CONFETTI = {
+    X: ["#1a5fd0", "#7fb0ff", "#ffffff", "#ffd166", "#2ec4b6", "#124aa6"],
+    O: ["#f2994a", "#ffb978", "#ffffff", "#ffd166", "#2ec4b6", "#d97b2a"],
+  };
+
+  /** Confetti in the winner's colours; `scale` thins it out for a loss. */
+  function confetti(winner, scale = 1) {
     const box = $("#confetti");
     box.innerHTML = "";
-    const n = window.innerWidth < 600 ? 50 : 90;
+    const palette = CONFETTI[winner] || COLORS;
+    const n = Math.round((window.innerWidth < 600 ? 50 : 90) * scale);
     for (let i = 0; i < n; i++) {
       const p = document.createElement("span");
       p.style.left = Math.random() * 100 + "%";
-      p.style.background = COLORS[i % COLORS.length];
+      p.style.background = palette[i % palette.length];
       p.style.animationDuration = 2.2 + Math.random() * 2 + "s";
       p.style.animationDelay = 0.35 + Math.random() * 0.8 + "s";
       p.style.transform = `rotate(${Math.random() * 360}deg)`;

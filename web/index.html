@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tic-Tac-Pro</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <header class="top">
+      <div>
+        <p class="eyebrow">Monte Carlo Tree Search and Game Playing</p>
+        <h1>Tic-Tac-Pro</h1>
+        <p class="tagline">Each player keeps at most <b>three</b> symbols. The fourth move removes the oldest one, and the win is checked after that.</p>
+      </div>
+    </header>
+
+    <section class="setup" id="setup">
+      <div class="field">
+        <span class="label">Mode</span>
+        <div class="seg" role="radiogroup" aria-label="Game mode">
+          <button type="button" data-mode="pvp" class="active">Player vs Player</button>
+          <button type="button" data-mode="pvc">Player vs CPU</button>
+        </div>
+      </div>
+      <div class="field" id="difficultyField" hidden>
+        <span class="label">CPU</span>
+        <div class="seg" role="radiogroup" aria-label="CPU difficulty">
+          <button type="button" data-difficulty="random">Random</button>
+          <button type="button" data-difficulty="rule">Rule-Based</button>
+          <button type="button" data-difficulty="minimax" class="active">Minimax</button>
+        </div>
+        <label class="depth" id="depthField">depth
+          <input type="number" id="depth" min="1" max="6" value="3">
+        </label>
+      </div>
+      <button type="button" class="primary" id="newGame">New game</button>
+    </section>
+
+    <section class="play">
+      <div class="boardwrap">
+        <div class="status" id="status" aria-live="polite">Loading…</div>
+        <div class="board" id="board" aria-label="Board">
+          <!-- 9 cells injected by app.js -->
+        </div>
+        <div class="actions">
+          <button type="button" id="offerDraw">Offer draw</button>
+          <label class="toggle" id="scoresToggleWrap" hidden>
+            <input type="checkbox" id="showScores"> show Minimax scores
+          </label>
+        </div>
+      </div>
+
+      <aside class="side">
+        <div class="queue" id="queueX">
+          <div class="qhead"><span class="sym x">X</span><span>active moves</span></div>
+          <div class="chips"></div>
+        </div>
+        <div class="queue" id="queueO">
+          <div class="qhead"><span class="sym o">O</span><span>active moves</span></div>
+          <div class="chips"></div>
+        </div>
+        <div class="log" id="log"></div>
+      </aside>
+    </section>
+
+    <dialog id="drawDialog">
+      <form method="dialog">
+        <p id="drawText">Player O, do you accept the draw?</p>
+        <menu>
+          <button value="decline">Decline</button>
+          <button value="accept" class="primary">Accept</button>
+        </menu>
+      </form>
+    </dialog>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

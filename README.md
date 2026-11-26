@@ -19,13 +19,35 @@ src/
   game.py     rules, turn order, expiration, draw flag, copy(), legal moves, state_key()
   ai.py       RandomAI, RuleBasedAI, MinimaxAI  (all expose choose_move(game))
   main.py     terminal interface
+  server.py   local web server: JSON API over the same engine
+web/          browser UI (index.html, style.css, app.js)
+run.py        starts the web server and opens the browser
 tests/        pytest suite
 ```
 
 Design rule: **AI code never re-implements the rules.** Every strategy plays
 through `game.get_legal_moves()`, `game.copy()` and `game.make_move()`.
 
-## Run
+## Play in the browser
+
+```powershell
+python run.py
+```
+
+This starts one local process that serves the web UI **and** the game API
+(standard library only, no installs), then opens http://127.0.0.1:8000/.
+On Windows you can also double-click `run.bat`. Options: `--port 9000`,
+`--no-browser`.
+
+Pick Player vs Player or Player vs CPU (Random, Rule-Based or Minimax with a
+depth), click cells to play, and use *Offer draw* as in the terminal game. The
+cell holding the current player's oldest symbol is dashed, and against Minimax
+you can tick *show Minimax scores* to see the root score it gave every cell.
+
+The server is `src/server.py` (`Session` + a JSON API: `/api/state`,
+`/api/new`, `/api/move`, `/api/cpu`, `/api/draw`); the UI is `web/`.
+
+## Play in the terminal
 
 ```powershell
 python -m src.main

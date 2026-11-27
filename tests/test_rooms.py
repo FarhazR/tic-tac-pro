@@ -49,11 +49,26 @@ def test_create_join_accept_play_and_rematch_in_memory():
     guest_view = svc.view(code, guest["token"])
     assert guest_view["you"] == "O" and guest_view["winner"] == "X"
 
-    # rematch keeps the score and starts round 2 with an empty board
+    # rematch keeps the score, starts round 2 with an empty board and swaps colours
     view = svc.rematch(code, guest["token"])
     assert view["round"] == 2 and view["ply"] == 0 and not view["game_over"]
-    assert view["score"]["X"] == 1
+    assert view["score"] == {"X": 0, "O": 1, "draw": 0}   # Alice's win follows her to O
     assert view["board"] == [[" "] * 3 for _ in range(3)]
+    assert view["you"] == "X"                       # the guest now plays X
+    assert view["players"] == {"X": "Bob", "O": "Alice"}
+    assert svc.view(code, host["token"])["you"] == "O"
+    with pytest.raises(RoomError):
+        svc.move(code, host["token"], 0, 0)          # X (now Bob) moves first
+    view = svc.move(code, guest["token"], 0, 0)
+    assert view["board"][0][0] == "X"
+    # a third round swaps back
+    for role, (r, c) in [("O", (1, 0)), ("X", (0, 1)), ("O", (1, 1)), ("X", (0, 2))]:
+        token = guest["token"] if role == "X" else host["token"]
+        view = svc.move(code, token, r, c)
+    assert view["winner"] == "X" and view["score"] == {"X": 1, "O": 1, "draw": 0}
+    view = svc.rematch(code, host["token"])
+    assert view["round"] == 3 and view["you"] == "X" and view["players"]["X"] == "Alice"
+    assert view["score"] == {"X": 1, "O": 1, "draw": 0}
 
 
 def test_turn_order_and_membership_are_enforced():

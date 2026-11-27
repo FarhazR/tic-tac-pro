@@ -422,6 +422,8 @@ button.primary:active { transform: translateY(3px); box-shadow: 0 2px 0 var(--x-
 .cell.expiring.o { border-color: var(--o); color: var(--o-pale); background: var(--o-soft); }
 
 .cell.placed { animation: pop 0.38s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.cell.pending { opacity: 0.72; }
+.cell.pending::after { content: ""; position: absolute; right: 8px; top: 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--o); animation: bounce 1s infinite; }
 
 .cell.win { animation: winglow 0.8s ease-in-out infinite alternate; z-index: 1; }
 .cell.win.x { border-color: var(--x); background: var(--x-soft); }

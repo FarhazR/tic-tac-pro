@@ -132,8 +132,11 @@ Choose **Online room**, enter a name and press *Create room*. You get a
 6-character code and an invite link (`?room=CODE`). The other player opens the
 link or types the code, enters a name and presses *Join*; the host sees the
 request and presses *Accept*. Both browsers then play Player vs Player: the
-host is X, moves are validated server-side, draw offers and rematches go
-through the room, and either side can leave. Rooms expire after a day.
+host is X in round 1 and the colours swap every rematch (the score follows
+the player), moves are validated server-side, draw offers and rematches go
+through the room, and either side can leave. Your own move is drawn at once
+and confirmed in the background; if the server rejects it or cannot be
+reached, the board rolls back and a toast says so. Rooms expire after a day.
 
 Rooms need the Python server, because browsers cannot share state on their
 own. Room state lives in **Postgres** when `DATABASE_URL` is set (for example

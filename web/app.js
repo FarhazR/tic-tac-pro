@@ -169,6 +169,40 @@
   // rooms live on the page's own server when one serves the page, else on the configured backend
   const roomsBase = () => (backend === "remote" ? "" : BACKEND);
 
+  /** Predict the room view after my move with the in-browser engine. null if unavailable. */
+  function optimisticMove(view, row, col) {
+    const T = window.TicTacPro;
+    if (!T) return null;
+    try {
+      const g = T.gameFromState(view);
+      const player = g.currentPlayer;
+      const oldest = player.moves.length === 3 ? player.moves[0].slice() : null;
+      if (!g.makeMove(row, col)) return null;
+      const expired = oldest && g.board.isEmpty(oldest[0], oldest[1]) ? oldest : null;
+      const q = (pl) => pl.moves.map((m) => m.slice());
+      const expiring = (pl) => (pl.moves.length === 3 ? pl.moves[0].slice() : null);
+      const line = g.winner ? T.LINES.find((l) => l.every(([r, c]) => g.board.grid[r][c] === g.winner)) : null;
+      return Object.assign({}, view, {
+        board: g.board.grid.map((r) => r.slice()),
+        current: g.currentPlayer.symbol,
+        queues: { X: q(g.player1), O: q(g.player2) },
+        expiring: { X: expiring(g.player1), O: expiring(g.player2) },
+        legal_moves: g.getLegalMoves(),
+        game_over: g.gameOver,
+        winner: g.winner,
+        winning_line: line ? line.map((c) => c.slice()) : null,
+        ply: view.ply + 1,
+        in_progress: !g.gameOver,
+        pending_draw: null,
+        message: g.gameOver ? view.message : `${view.players[g.currentPlayer.symbol]} (${g.currentPlayer.symbol}) to move.`,
+        last_move: { player: player.symbol, cell: [row, col], expired, by: "human" },
+        optimistic: true,
+      });
+    } catch (e) {
+      return null;
+    }
+  }
+
   function roomApi(path, body) {
     return request(roomsBase() + path, body, { "X-Room-Token": online.token || "" });
   }
@@ -290,6 +324,11 @@
     if (view.status === "playing") loggedPly = view.ply;
     if (view.ply === 0) loggedPly = 0;
 
+    if (view.you && view.you !== online.role) {
+      online.role = view.you;
+      saveRoom();
+      if (prev && prev.round !== view.round) log(`You now play <b>${online.role}</b>.`);
+    }
     online.view = view;
     showOnlineError("");
     score = view.score;
@@ -484,11 +523,28 @@
     busy = true;
     try {
       if (state.mode === "online") {
-        const view = await roomApi(`/api/rooms/${online.code}/move`, { row, col });
-        logMove(view.last_move);
-        playMoveSound(view.last_move);
-        loggedPly = view.ply;
-        applyView(view);
+        const previous = state;
+        const guess = optimisticMove(state, row, col);
+        if (guess) {
+          state = guess;                      // show the move immediately
+          logMove(guess.last_move);
+          playMoveSound(guess.last_move);
+          loggedPly = guess.ply;
+          render();
+        }
+        try {
+          const view = await roomApi(`/api/rooms/${online.code}/move`, { row, col });
+          if (!guess) { logMove(view.last_move); playMoveSound(view.last_move); }
+          loggedPly = view.ply;
+          applyView(view);
+        } catch (e) {
+          state = previous;                   // roll back
+          loggedPly = previous.ply;
+          render();
+          const slow = !e.status || e.status >= 500;
+          toast(slow ? "Move not sent: the connection is slow or down. Try again." : e.message, 3600);
+          Sound.play("expire");
+        }
       } else {
         state = await api("/api/move", { row, col });
         score = state.score;
@@ -932,6 +988,7 @@
         cell.title = "Oldest symbol: it expires on this player’s next move";
       }
       if (winCells.includes(`${r},${c}`)) cell.classList.add("win");
+      if (state.optimistic && last && last.cell[0] === r && last.cell[1] === c) cell.classList.add("pending");
       if (doAnimate && last.cell[0] === r && last.cell[1] === c && !state.winning_line) cell.classList.add("placed");
       cell.disabled = !turn || !legal;
 

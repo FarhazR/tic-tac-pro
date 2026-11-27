@@ -223,11 +223,34 @@ class RoomService:
         raise RoomError("Could not allocate a room code, try again.", 503)
 
     @staticmethod
-    def _role(room, token):
+    def _score(room):
+        """Per-player tally; rooms created before colours alternated used X/O keys (host was X)."""
+        score = room["score"]
+        if "host" not in score:
+            score = room["score"] = {"host": score.get("X", 0), "guest": score.get("O", 0), "draw": score.get("draw", 0)}
+        return score
+
+    @classmethod
+    def _score_by_symbol(cls, room):
+        """The tally keyed by the symbol each player holds in the current round."""
+        score = cls._score(room)
+        host_sym = cls._symbol_of(room, "host")
+        return {host_sym: score["host"], ("O" if host_sym == "X" else "X"): score["guest"], "draw": score["draw"]}
+
+    @staticmethod
+    def _symbol_of(room, who):
+        """Host plays X in odd rounds and O in even rounds; the guest the other way."""
+        swapped = bool(room.get("swapped"))
+        if who == "host":
+            return "O" if swapped else "X"
+        return "X" if swapped else "O"
+
+    @classmethod
+    def _role(cls, room, token):
         if token and room["host"]["token"] == token:
-            return "X"
+            return cls._symbol_of(room, "host")
         if token and room.get("guest") and room["guest"]["token"] == token:
-            return "O"
+            return cls._symbol_of(room, "guest")
         raise RoomError("Not a member of this room.", 403)
 
     @staticmethod
@@ -244,17 +267,18 @@ class RoomService:
             "guest": None,
             "game": self._fresh_game(),
             "round": 1,
+            "swapped": False,               # colours alternate every rematch
             "ply": 0,
             "last_move": None,
             "pending_draw": None,           # symbol that offered a draw
-            "score": {"X": 0, "O": 0, "draw": 0},
+            "score": {"host": 0, "guest": 0, "draw": 0},   # per player: colours alternate
             "message": "Waiting for a second player.",
             "created_at": time.time(),
             "updated_at": time.time(),
             "version": 0,
         }
         self.store.create(room)
-        return {"code": room["code"], "token": room["host"]["token"], "role": "X", "name": name}
+        return {"code": room["code"], "token": room["host"]["token"], "role": self._symbol_of(room, "host"), "name": name}
 
     def join(self, code, name):
         code, name = self._clean_code(code), self._clean_name(name)
@@ -270,7 +294,7 @@ class RoomService:
             room["guest"] = {"name": name, "token": token}
             room["status"] = "pending"
             room["message"] = f"{name} wants to join. Waiting for {room['host']['name']} to accept."
-            return {"code": code, "token": token, "role": "O", "name": name}
+            return {"code": code, "token": token, "role": self._symbol_of(room, "guest"), "name": name}
 
         return self.store.update(code, apply)
 
@@ -278,19 +302,19 @@ class RoomService:
         code = self._clean_code(code)
 
         def apply(room):
-            if self._role(room, token) != "X":
+            if token != room["host"]["token"]:
                 raise RoomError("Only the host can accept or decline.", 403)
             if room["status"] != "pending" or not room.get("guest"):
                 raise RoomError("Nobody is waiting to join.", 409)
             if accept:
                 room["status"] = "playing"
-                room["message"] = f"{room['host']['name']} (X) to move."
+                room["message"] = f"{self._name(room, 'X')} (X) to move."
             else:
                 declined = room["guest"]["name"]
                 room["guest"] = None
                 room["status"] = "waiting"
                 room["message"] = f"{declined} was declined. Waiting for a second player."
-            return self._view(room, "X")
+            return self._view(room, self._symbol_of(room, "host"))
 
         return self.store.update(code, apply)
 
@@ -299,12 +323,13 @@ class RoomService:
 
         def apply(room):
             role = self._role(room, token)
-            if role == "O" and room["status"] == "pending":
+            is_guest = bool(room.get("guest")) and room["guest"]["token"] == token
+            if is_guest and room["status"] == "pending":
                 room["guest"] = None
                 room["status"] = "waiting"
                 room["message"] = "Waiting for a second player."
                 return {"ok": True}
-            name = room["host"]["name"] if role == "X" else room["guest"]["name"]
+            name = self._name(room, role)
             room["status"] = "closed"
             room["message"] = f"{name} left the room."
             return {"ok": True}
@@ -338,7 +363,7 @@ class RoomService:
             room["last_move"] = {"player": role, "cell": [r, c], "expired": list(expired) if expired else None, "by": "human"}
             room["game"] = game_to_dict(game)
             if game.winner:
-                room["score"][game.winner] += 1
+                self._score(room)["host" if self._symbol_of(room, "host") == game.winner else "guest"] += 1
                 room["message"] = f"{self._name(room, game.winner)} ({game.winner}) wins!"
             else:
                 room["message"] = f"{self._name(room, game.current_player.symbol)} ({game.current_player.symbol}) to move."
@@ -369,7 +394,7 @@ class RoomService:
                 if action == "accept":
                     game.end_in_draw()
                     room["game"] = game_to_dict(game)
-                    room["score"]["draw"] += 1
+                    self._score(room)["draw"] += 1
                     room["message"] = "Draw agreed. Game over."
                 else:
                     room["message"] = f"{self._name(room, role)} declined the draw. {self._name(room, game.current_player.symbol)} to move."
@@ -390,11 +415,12 @@ class RoomService:
                 raise RoomError("Finish the current game first.", 409)
             room["game"] = self._fresh_game()
             room["round"] += 1
+            room["swapped"] = not room.get("swapped", False)
             room["ply"] = 0
             room["last_move"] = None
             room["pending_draw"] = None
-            room["message"] = f"Round {room['round']}. {room['host']['name']} (X) to move."
-            return self._view(room, role)
+            room["message"] = f"Round {room['round']}. Colours swapped: {self._name(room, 'X')} plays X and moves first."
+            return self._view(room, self._role(room, token))
 
         return self.store.update(code, apply)
 
@@ -406,11 +432,12 @@ class RoomService:
             raise RoomError("Room not found.", 404)
         return self._view(room, self._role(room, token))
 
-    @staticmethod
-    def _name(room, symbol):
-        if symbol == "X":
+    @classmethod
+    def _name(cls, room, symbol):
+        who = "host" if cls._symbol_of(room, "host") == symbol else "guest"
+        if who == "host":
             return room["host"]["name"]
-        return room["guest"]["name"] if room.get("guest") else "Player O"
+        return room["guest"]["name"] if room.get("guest") else f"Player {symbol}"
 
     def _view(self, room, role):
         game = game_from_dict(room["game"])
@@ -427,7 +454,11 @@ class RoomService:
             "you": role,
             "round": room["round"],
             "version": room["version"],
-            "players": {"X": room["host"]["name"], "O": room["guest"]["name"] if room.get("guest") else None},
+            "players": {
+                "X": self._name(room, "X") if (room.get("guest") or self._symbol_of(room, "host") == "X") else None,
+                "O": self._name(room, "O") if (room.get("guest") or self._symbol_of(room, "host") == "O") else None,
+            },
+            "host": room["host"]["name"],
             "pending_draw": room["pending_draw"],
             # the same shape the single-device UI already renders
             "board": [row[:] for row in game.board.grid],
@@ -441,7 +472,7 @@ class RoomService:
             "draw": game.draw,
             "ply": room["ply"],
             "in_progress": room["status"] == "playing" and not game.game_over,
-            "score": dict(room["score"]),
+            "score": self._score_by_symbol(room),
             "mode": "online",
             "difficulty": None,
             "difficulty_name": None,
